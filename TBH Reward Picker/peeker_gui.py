@@ -700,7 +700,7 @@ class PeekerGUI(ctk.CTk):
                     self.sprite_mapping = mapping
                     self.after(0, lambda: self.append_log(f"[SPRITES] Database mapping successfully built with {len(mapping)} items!\n"))
             except Exception as e:
-                self.after(0, lambda: self.append_log(f"[WARNING] Failed to build sprite database: {e}\n"))
+                self.after(0, lambda err=e: self.append_log(f"[WARNING] Failed to build sprite database: {err}\n"))
 
         threading.Thread(target=build_thread, daemon=True).start()
 
@@ -2018,7 +2018,7 @@ class PeekerGUI(ctk.CTk):
                     self.after(0, lambda: messagebox.showerror("Error", f"certutil failed with code {proc.returncode}"))
             except Exception as e:
                 self.append_log(f"[ERROR] Failed to run certutil: {e}\n")
-                self.after(0, lambda: messagebox.showerror("Error", f"Failed to run certutil: {e}"))
+                self.after(0, lambda err=e: messagebox.showerror("Error", f"Failed to run certutil: {err}"))
  
         threading.Thread(target=work, daemon=True).start()
  
