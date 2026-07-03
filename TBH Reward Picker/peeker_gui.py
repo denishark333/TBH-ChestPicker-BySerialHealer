@@ -1,0 +1,2871 @@
+from __future__ import annotations
+ 
+import json
+import os
+import re
+import sys
+import time
+import shutil
+import subprocess
+import threading
+import warnings
+import ctypes
+from pathlib import Path
+from typing import Any
+ 
+# Silence deprecation and user warnings to keep the console clean
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+warnings.filterwarnings("ignore", category=UserWarning)
+ 
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import messagebox
+from PIL import Image
+ 
+# Import winsound on Windows for alerts
+try:
+    import winsound
+except ImportError:
+    winsound = None
+ 
+# =====================================================================
+# Constants & Colors (Matching tbh_reward_hook.py style)
+# =====================================================================
+COLOR_BG = "#0b0b0b"          # Deep charcoal background
+COLOR_FRAME = "#141414"       # Dark panel surface
+COLOR_PRIMARY = "#c8a24b"     # Soft muted gold accent
+COLOR_HOVER = "#f2c94c"       # Lighter gold hover
+COLOR_SECONDARY = "#1d1d1d"   # Charcoal card background
+COLOR_SEC_HOVER = "#2a2a2a"   # Lighter charcoal hover
+COLOR_TEXT = "#e8e8e8"        # Light text for the dashboard
+COLOR_MUTED = "#b8b8b8"       # Softer muted text
+COLOR_ENTRY_BG = "#111111"    # Dark entry background
+COLOR_BORDER = "#2f2f2f"      # Soft border color
+ 
+GRADE_COLORS = {
+    "COMMON": "#95a5a6",
+    "UNCOMMON": "#2ecc71",
+    "RARE": "#3498db",
+    "LEGENDARY": "#e67e22",
+    "IMMORTAL": "#911a1b",      # Darker red
+    "ARCANA": "#9b59b6",        # Purple
+    "BEYOND": "#1abc9c",
+    "CELESTIAL": "#00d2d3",     # Cyan
+    "DIVINE": "#f1c40f",        # Gold
+    "COSMIC": "#fd79a8",
+    "BOSS": "#00a8ff"           # Bright blue/cyan for Stage Boss Box
+}
+ 
+ROOT = Path(__file__).resolve().parent
+PEEKER_CONFIG_PATH = ROOT / "peeker_config.json"
+ITEMS_PATH = ROOT / "items.json"
+ADDON_PATH = ROOT / "chest_peeker.py"
+ 
+# Windows POINT structure for mouse positioning
+class POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+ 
+# =====================================================================
+# GUI Application Class
+# =====================================================================
+class PeekerGUI(ctk.CTk):
+    def __init__(self) -> None:
+        super().__init__()
+ 
+        self.title("TBH Picker - Auto Relogger")
+        self.geometry("1100x780")
+        self.minsize(960, 640)
+        self.configure(fg_color=COLOR_BG)
+        ctk.set_appearance_mode("dark")
+ 
+        # Load Items database
+        self.items_db: list[dict[str, Any]] = []
+        self.load_items_db()
+ 
+        # State configurations
+        self.coords = {
+            "menu": None,
+            "exit": None,
+            "stage_icon": None,
+            "confirm_enter": None
+        }
+        self.target_items: list[int] = []
+        self.target_grades: list[str] = ["BEYOND", "IMMORTAL", "ARCANA", "CELESTIAL", "DIVINE", "COSMIC"]
+        self.relogger_method = "process_restart"
+        self.game_path = r"C:\Program Files (x86)\Steam\steamapps\common\TaskbarHero\TaskBarHero.exe"
+        self.last_found_item_ids: list[int] = []
+        self.last_found_item_indices: list[int] = []
+        self.last_found_chest_ids: list[int | None] = []
+        self.last_found_res_type: str = "chests"
+        self.pause_duration = 110
+        self.paused_countdown_id = None
+        self.discord_notify_enabled = False
+        self.discord_webhook_url = ""
+        self.discord_user_id = ""
+        self.trainer_auto_launch = False
+        self.trainer_path = str(ROOT / "TBH Trainer.exe")
+        self.relog_safety_delay = 45  # seconds to wait after collecting item before relogging (anti-rollback)
+        self.max_chest_index = 43  # default max chest index to match grade filters
+        self.dashboard_scans_done = 0
+        self.dashboard_loots_observed = 0
+        self.dashboard_targets_found = 0
+        self.dashboard_last_activity = "Ready"
+        self.sprite_mapping = {}
+        self.load_peeker_config()
+ 
+        # Execution state
+        self.proxy_process: subprocess.Popen | None = None
+        self.proxy_running = False
+        self.relogger_active = False
+        self.calibrating_key = None
+        self.watchdog_token = 0
+        self.reentry_in_progress = False
+        self.safety_countdown_active = False
+        self.consecutive_errors = 0
+        self.last_launch_time = 0
+        self.load_or_build_sprite_mapping()
+        
+        # Build UI
+        self.create_widgets()
+        
+        # Bind close protocol handler
+        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        
+        # Start state check loop (hotkeys and logs)
+        self.after(50, self.check_hotkeys)
+        self.after(100, self.start_proxy) # Auto-start proxy on startup!
+        self.append_log("[INFO] Peeker GUI loaded. Ready.\n")
+ 
+    # =====================================================================
+    # Config & Database Loading
+    # =====================================================================
+    def load_items_db(self) -> None:
+        if ITEMS_PATH.exists():
+            try:
+                with open(ITEMS_PATH, "r", encoding="utf-8") as f:
+                    self.items_db = json.load(f)
+            except Exception as e:
+                print(f"Error loading items.json: {e}")
+        
+    def load_peeker_config(self) -> None:
+        if PEEKER_CONFIG_PATH.exists():
+            try:
+                data = json.loads(PEEKER_CONFIG_PATH.read_text(encoding="utf-8-sig"))
+                self.coords = data.get("coords", self.coords)
+                self.target_items = data.get("target_items", [])
+                self.target_grades = data.get("target_grades", self.target_grades)
+                self.relogger_method = data.get("relogger_method", "process_restart")
+                self.game_path = data.get("game_path", r"C:\Program Files (x86)\Steam\steamapps\common\TaskbarHero\TaskBarHero.exe")
+                self.pause_duration = data.get("pause_duration", 110)
+                self.discord_notify_enabled = data.get("discord_notify_enabled", False)
+                self.discord_webhook_url = data.get("discord_webhook_url", "")
+                self.discord_user_id = data.get("discord_user_id", "")
+                self.trainer_auto_launch = data.get("trainer_auto_launch", False)
+                self.trainer_path = data.get("trainer_path", str(ROOT / "TBH Trainer.exe"))
+                self.relog_safety_delay = data.get("relog_safety_delay", 45)
+                self.max_chest_index = data.get("max_chest_index", 43)
+            except Exception:
+                pass
+ 
+    def save_peeker_config(self) -> None:
+        try:
+            data = {
+                "coords": self.coords,
+                "target_items": self.target_items,
+                "target_grades": self.target_grades,
+                "relogger_method": self.relogger_method,
+                "game_path": self.game_path,
+                "pause_duration": self.pause_duration,
+                "discord_notify_enabled": self.discord_notify_enabled,
+                "discord_webhook_url": self.discord_webhook_url,
+                "discord_user_id": self.discord_user_id,
+                "trainer_auto_launch": self.trainer_auto_launch,
+                "trainer_path": self.trainer_path,
+                "relog_safety_delay": self.relog_safety_delay,
+                "max_chest_index": self.max_chest_index
+            }
+            PEEKER_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to save config: {e}\n")
+ 
+    # =====================================================================
+    # UI Layout & Construction
+    # =====================================================================
+    def create_widgets(self) -> None:
+        # Title Header
+        self.title_label = ctk.CTkLabel(
+            self,
+            text="TBH Picker - Auto Relogger",
+            font=ctk.CTkFont(family="Inter", size=20, weight="bold"),
+            text_color=COLOR_PRIMARY
+        )
+        self.title_label.pack(pady=(20, 2), padx=20, anchor="w")
+ 
+        self.subtitle_label = ctk.CTkLabel(
+            self,
+            text="Peeks at stage rewards and automates re-entry until target items are found.",
+            font=ctk.CTkFont(family="Inter", size=13),
+            text_color=COLOR_MUTED
+        )
+        self.subtitle_label.pack(pady=(0, 15), padx=20, anchor="w")
+ 
+        self.main_container = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
+        self.main_container.grid_columnconfigure(0, weight=1)
+        self.main_container.grid_rowconfigure(0, weight=1)
+
+        self.sidebar = ctk.CTkFrame(self.main_container, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1, width=220)
+        self.sidebar.pack(side="left", fill="y", padx=(0, 12))
+        self.sidebar.pack_propagate(False)
+
+        self.sidebar_title = ctk.CTkLabel(self.sidebar, text="Navigation", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        self.sidebar_title.pack(anchor="w", padx=16, pady=(16, 12))
+
+        self.sidebar_buttons = {}
+        for name in ["Dashboard", "Targets & Alerts", "Settings", "Console Log"]:
+            btn = ctk.CTkButton(
+                self.sidebar,
+                text=name,
+                fg_color="transparent",
+                hover_color=COLOR_SECONDARY,
+                border_width=1,
+                border_color=COLOR_BORDER,
+                height=38,
+                command=lambda n=name: self.show_tab(n)
+            )
+            btn.pack(fill="x", padx=12, pady=(0, 8))
+            self.sidebar_buttons[name] = btn
+
+        self.content_area = ctk.CTkFrame(self.main_container, fg_color="transparent")
+        self.content_area.pack(side="left", fill="both", expand=True)
+
+        self.tab_frames = {}
+        self.tab_dashboard = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        self.tab_targets = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        self.tab_settings = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        self.tab_console = ctk.CTkFrame(self.content_area, fg_color="transparent")
+
+        self.tab_frames["Dashboard"] = self.tab_dashboard
+        self.tab_frames["Targets & Alerts"] = self.tab_targets
+        self.tab_frames["Settings"] = self.tab_settings
+        self.tab_frames["Console Log"] = self.tab_console
+
+        for frame in self.tab_frames.values():
+            frame.pack(fill="both", expand=True)
+            frame.pack_forget()
+
+        self.build_dashboard_tab()
+        self.build_targets_tab()
+        self.build_settings_tab()
+        self.build_console_tab()
+        self.update_dashboard_stats()
+        self.show_tab("Dashboard")
+ 
+    def build_dashboard_tab(self) -> None:
+        self.dashboard_scroll = ctk.CTkScrollableFrame(
+            self.tab_dashboard,
+            fg_color="transparent",
+            scrollbar_button_color=COLOR_PRIMARY,
+            scrollbar_button_hover_color=COLOR_HOVER
+        )
+        self.dashboard_scroll.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self.dashboard_content = ctk.CTkFrame(self.dashboard_scroll, fg_color="transparent")
+        self.dashboard_content.pack(fill="both", expand=True)
+        self.dashboard_content.grid_columnconfigure(0, weight=1)
+        self.dashboard_content.grid_columnconfigure(1, weight=1)
+        self.dashboard_content.grid_rowconfigure(0, weight=0)
+        self.dashboard_content.grid_rowconfigure(1, weight=0)
+        self.dashboard_content.grid_rowconfigure(2, weight=1)
+        self.dashboard_content.grid_rowconfigure(3, weight=1)
+        self.dashboard_content.grid_rowconfigure(4, weight=0)
+
+        # Create placeholder PIL image and CTkImage to prevent layout shift
+        self.placeholder_pil = Image.new("RGBA", (32, 32), (26, 26, 30, 255))
+        self.placeholder_image = ctk.CTkImage(self.placeholder_pil, size=(32, 32))
+        
+        self.placeholder_chest_pil = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
+        self.placeholder_chest_image = ctk.CTkImage(self.placeholder_chest_pil, size=(16, 16))
+
+        # Alert banner with dynamic height and icon container
+        self.alert_banner = ctk.CTkFrame(self.dashboard_content, fg_color="#121212", border_color=COLOR_PRIMARY, border_width=1, height=75)
+        self.alert_banner.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
+        self.alert_banner.pack_propagate(False)
+        
+        alert_content = ctk.CTkFrame(self.alert_banner, fg_color="transparent")
+        alert_content.pack(expand=True, padx=20, pady=10)
+        
+        self.lbl_alert_icon = ctk.CTkLabel(alert_content, text="", width=32, height=32, fg_color="#1a1a1e", corner_radius=4, image=self.placeholder_image)
+        self.lbl_alert_icon.pack(side="left", padx=(0, 12))
+        self.lbl_alert_icon._my_image_ref = self.placeholder_image
+        
+        self.alert_banner_label = ctk.CTkLabel(alert_content, text="Alert: No active alerts.", font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_MUTED, wraplength=600, justify="left", anchor="w")
+        self.alert_banner_label.pack(side="left", fill="both", expand=True)
+
+        self.upcoming_banner = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1, height=265)
+        self.upcoming_banner.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
+        self.upcoming_banner.pack_propagate(False)
+        
+        ctk.CTkLabel(self.upcoming_banner, text="Upcoming Important Drops", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=16, pady=(12, 8))
+        self.upcoming_cards = ctk.CTkFrame(self.upcoming_banner, fg_color="transparent")
+        self.upcoming_cards.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.upcoming_cards.grid_columnconfigure(0, weight=1)
+        self.upcoming_cards.grid_columnconfigure(1, weight=1)
+        self.upcoming_cards.grid_columnconfigure(2, weight=1)
+        self.upcoming_cards.grid_rowconfigure(0, weight=1, minsize=90)
+        self.upcoming_cards.grid_rowconfigure(1, weight=1, minsize=90)
+
+        self.upcoming_card_vars = {}
+        self.upcoming_card_widgets = {}
+        for idx, rarity in enumerate(["IMMORTAL", "LEGENDARY", "RARE", "BEYOND", "ARCANA"]):
+            card = ctk.CTkFrame(self.upcoming_cards, fg_color="#161616", border_color=COLOR_BORDER, border_width=1)
+            card.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=6, pady=6)
+            color = GRADE_COLORS.get(rarity, COLOR_PRIMARY)
+            card.configure(border_color=color)
+            
+            # Header
+            ctk.CTkLabel(card, text=rarity, font=ctk.CTkFont(size=11, weight="bold"), text_color=color).pack(anchor="w", padx=10, pady=(6, 2))
+            
+            # Horizontal layout container
+            content_frame = ctk.CTkFrame(card, fg_color="transparent")
+            content_frame.pack(fill="both", expand=True, padx=8, pady=(2, 6))
+            
+            # Item Icon on the left
+            lbl_item_icon = ctk.CTkLabel(content_frame, text="", width=32, height=32, fg_color="#1a1a1e", corner_radius=4, image=self.placeholder_image)
+            lbl_item_icon.pack(side="left", padx=(0, 8), anchor="n")
+            lbl_item_icon._my_image_ref = self.placeholder_image
+            
+            # Details column on the right
+            details_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
+            details_frame.pack(side="left", fill="both", expand=True)
+            
+            lbl_name = ctk.CTkLabel(details_frame, text="No drop yet", font=ctk.CTkFont(size=10, weight="bold"), text_color=COLOR_TEXT, wraplength=140, justify="left", anchor="w")
+            lbl_name.pack(fill="x", anchor="w")
+            
+            # Chest info row (hidden by default)
+            chest_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
+            chest_frame.pack(fill="x", anchor="w", pady=(2, 0))
+            chest_frame.pack_forget()
+            
+            lbl_from = ctk.CTkLabel(chest_frame, text="In: ", font=ctk.CTkFont(size=9), text_color=COLOR_MUTED, anchor="w")
+            lbl_from.pack(side="left")
+            
+            lbl_chest_icon = ctk.CTkLabel(chest_frame, text="", width=16, height=16, fg_color="transparent", image=self.placeholder_chest_image)
+            lbl_chest_icon.pack(side="left", padx=(1, 4))
+            lbl_chest_icon._my_image_ref = self.placeholder_chest_image
+            
+            lbl_chest_name = ctk.CTkLabel(chest_frame, text="", font=ctk.CTkFont(size=9, slant="italic"), text_color=COLOR_MUTED, anchor="w")
+            lbl_chest_name.pack(side="left", fill="x", expand=True)
+            
+            # Save references
+            self.upcoming_card_widgets[rarity] = {
+                "card": card,
+                "lbl_name": lbl_name,
+                "lbl_item_icon": lbl_item_icon,
+                "chest_frame": chest_frame,
+                "lbl_chest_icon": lbl_chest_icon,
+                "lbl_chest_name": lbl_chest_name
+            }
+
+        self.proxy_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.proxy_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
+        lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl.pack(anchor="w", padx=15, pady=(8, 10))
+        self.btn_proxy = ctk.CTkButton(self.proxy_frame, text="Start Peeker Proxy", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.toggle_proxy, height=36)
+        self.btn_proxy.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_trust_cert = ctk.CTkButton(self.proxy_frame, text="Trust CA Certificate", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11, weight="bold"), command=self.install_cert_automatically, height=28)
+        self.btn_trust_cert.pack(fill="x", padx=15, pady=(0, 8))
+        self.lbl_proxy_status = ctk.CTkLabel(self.proxy_frame, text="Status: Stopped", text_color=COLOR_MUTED, font=ctk.CTkFont(size=12, slant="italic"))
+        self.lbl_proxy_status.pack(anchor="w", padx=15, pady=(0, 8))
+
+        self.telemetry_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.telemetry_frame.grid(row=2, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        telemetry_title = ctk.CTkLabel(self.telemetry_frame, text="Session Telemetry", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        telemetry_title.pack(anchor="w", padx=15, pady=(10, 8))
+
+        self.telemetry_grid = ctk.CTkFrame(self.telemetry_frame, fg_color="transparent")
+        self.telemetry_grid.pack(fill="x", padx=15, pady=(0, 8))
+        self.telemetry_grid.grid_columnconfigure(0, weight=1)
+        self.telemetry_grid.grid_columnconfigure(1, weight=1)
+
+        self.telemetry_scans_var = ctk.StringVar(value="0")
+        self.telemetry_loots_var = ctk.StringVar(value="0")
+        self.telemetry_targets_var = ctk.StringVar(value="0")
+        self.telemetry_last_var = ctk.StringVar(value="Idle")
+
+        self.telemetry_cards = []
+        for idx, (label_text, var) in enumerate([("Scans", self.telemetry_scans_var), ("Loots", self.telemetry_loots_var), ("Targets", self.telemetry_targets_var), ("Last", self.telemetry_last_var)]):
+            card = ctk.CTkFrame(self.telemetry_grid, fg_color="#181818", border_color=COLOR_BORDER, border_width=1)
+            card.grid(row=idx // 2, column=idx % 2, sticky="nsew", padx=4, pady=4)
+            ctk.CTkLabel(card, text=label_text, font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED).pack(anchor="w", padx=10, pady=(8, 2))
+            ctk.CTkLabel(card, textvariable=var, font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=10, pady=(0, 8))
+            self.telemetry_cards.append(card)
+
+        self.next_drop_banner = ctk.CTkFrame(self.telemetry_frame, fg_color="#171717", border_color=COLOR_BORDER, border_width=1)
+        self.next_drop_banner.pack(fill="x", padx=15, pady=(8, 12))
+        ctk.CTkLabel(self.next_drop_banner, text="Next Valuable Drop", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=10, pady=(8, 2))
+        
+        # Horizontal container for Next Valuable Drop details to prevent layout shift
+        next_drop_content = ctk.CTkFrame(self.next_drop_banner, fg_color="transparent")
+        next_drop_content.pack(fill="x", padx=10, pady=(0, 10))
+        
+        # Icon on the left
+        self.lbl_next_drop_icon = ctk.CTkLabel(next_drop_content, text="", width=32, height=32, fg_color="#1a1a1e", corner_radius=4, image=self.placeholder_image)
+        self.lbl_next_drop_icon.pack(side="left", padx=(0, 8), anchor="center")
+        self.lbl_next_drop_icon._my_image_ref = self.placeholder_image
+        
+        self.next_drop_var = ctk.StringVar(value="Waiting for scan...")
+        self.lbl_next_drop = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_var, font=ctk.CTkFont(size=11), text_color=COLOR_MUTED, wraplength=280, justify="left", anchor="w")
+        self.lbl_next_drop.pack(side="left", fill="both", expand=True)
+
+        self.bot_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.bot_frame.grid(row=3, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
+        lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl_bot.pack(anchor="w", padx=15, pady=(8, 10))
+        self.btn_bot = ctk.CTkButton(self.bot_frame, text="Start Auto-Relogger", fg_color="#2ecc71", hover_color="#27ae60", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.toggle_relogger, height=36)
+        self.btn_bot.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_force_relaunch = ctk.CTkButton(self.bot_frame, text="Force Relaunch Game", fg_color="#3498db", hover_color="#2980b9", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.force_relaunch_game, height=36)
+        self.btn_force_relaunch.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_item_collected = ctk.CTkButton(self.bot_frame, text="✅ Item Collected → Relog Now", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.skip_to_safety_relog, height=36)
+        self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_item_collected.pack_forget()
+        self.lbl_bot_status = ctk.CTkLabel(self.bot_frame, text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, weight="bold"), justify="left")
+        self.lbl_bot_status.pack(anchor="w", padx=15, pady=(0, 8))
+
+        self.dashboard_summary_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.dashboard_summary_frame.grid(row=3, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
+        ctk.CTkLabel(self.dashboard_summary_frame, text="Quick Overview", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=15, pady=(10, 8))
+        ctk.CTkLabel(self.dashboard_summary_frame, text="• Proxy, scanner and alerting are now separated by tabs.\n• Target monitoring and webhook alerts are grouped together.\n• Console output remains available in its dedicated tab.", font=ctk.CTkFont(size=11), text_color=COLOR_MUTED, justify="left", wraplength=320).pack(anchor="w", padx=15, pady=(0, 10))
+
+        footer = ctk.CTkLabel(self.dashboard_content, text="Powered by: SH", font=ctk.CTkFont(size=11), text_color=COLOR_MUTED)
+        footer.grid(row=4, column=0, columnspan=2, sticky="s", pady=(12, 0))
+
+    def build_targets_tab(self) -> None:
+        self.targets_scroll = ctk.CTkScrollableFrame(
+            self.tab_targets,
+            fg_color="transparent",
+            scrollbar_button_color=COLOR_PRIMARY,
+            scrollbar_button_hover_color=COLOR_HOVER
+        )
+        self.targets_scroll.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self.filter_tabview = ctk.CTkTabview(
+            self.targets_scroll,
+            fg_color=COLOR_FRAME,
+            segmented_button_selected_color=COLOR_PRIMARY,
+            segmented_button_selected_hover_color=COLOR_HOVER,
+            segmented_button_unselected_color=COLOR_SECONDARY,
+            segmented_button_unselected_hover_color=COLOR_SEC_HOVER,
+            text_color=COLOR_TEXT
+        )
+        self.filter_tabview.pack(fill="both", expand=True)
+
+        self.tab_items = self.filter_tabview.add("Item Targets")
+        self.tab_grades = self.filter_tabview.add("Grade Targets")
+        self.tab_notifications = self.filter_tabview.add("Notifications")
+
+        self.build_item_filters_tab()
+        self.build_grade_filters_tab()
+        self.build_notifications_tab()
+
+    def build_settings_tab(self) -> None:
+        self.settings_scroll = ctk.CTkScrollableFrame(
+            self.tab_settings,
+            fg_color="transparent",
+            scrollbar_button_color=COLOR_PRIMARY,
+            scrollbar_button_hover_color=COLOR_HOVER
+        )
+        self.settings_scroll.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self.calib_frame = ctk.CTkFrame(self.settings_scroll, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.calib_frame.pack(fill="x", pady=(0, 15), ipady=5)
+
+        lbl_cal = ctk.CTkLabel(self.calib_frame, text="Auto-Relogger Setup", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl_cal.pack(anchor="w", padx=15, pady=(8, 5))
+
+        self.relogger_method_var = ctk.StringVar(value="Process Restart" if self.relogger_method == "process_restart" else "Mouse Clicks")
+        self.seg_method = ctk.CTkSegmentedButton(
+            self.calib_frame,
+            values=["Process Restart", "Mouse Clicks"],
+            variable=self.relogger_method_var,
+            command=self.on_relogger_method_changed,
+            selected_color=COLOR_PRIMARY,
+            selected_hover_color=COLOR_HOVER,
+            unselected_color=COLOR_SECONDARY,
+            unselected_hover_color=COLOR_SEC_HOVER,
+            text_color=COLOR_TEXT
+        )
+        self.seg_method.pack(fill="x", padx=15, pady=5)
+
+        self.restart_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        lbl_path = ctk.CTkLabel(self.restart_container, text="TaskbarHero.exe Path:", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        lbl_path.pack(anchor="w", padx=0, pady=(5, 2))
+        path_row = ctk.CTkFrame(self.restart_container, fg_color="transparent")
+        path_row.pack(fill="x")
+        self.entry_game_path = ctk.CTkEntry(
+            path_row,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_game_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.entry_game_path.insert(0, self.game_path)
+        self.entry_game_path.bind("<KeyRelease>", self.on_game_path_typed)
+        self.btn_browse = ctk.CTkButton(
+            path_row,
+            text="Browse",
+            width=60,
+            height=28,
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.browse_game_path
+        )
+        self.btn_browse.pack(side="right")
+
+        self.clicks_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        lbl_inst = ctk.CTkLabel(
+            self.clicks_container,
+            text="Click a button below, hover over the game item, then press F8 to save.",
+            font=ctk.CTkFont(size=10, slant="italic"),
+            text_color=COLOR_MUTED,
+            wraplength=350,
+            justify="left"
+        )
+        lbl_inst.pack(anchor="w", padx=0, pady=(0, 5))
+
+        grid = ctk.CTkFrame(self.clicks_container, fg_color="transparent")
+        grid.pack(fill="x", pady=2)
+        grid.grid_columnconfigure(0, weight=1)
+        grid.grid_columnconfigure(1, weight=1)
+
+        self.btn_cal_menu = ctk.CTkButton(grid, text="1. Menu Button", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("menu"), height=26)
+        self.btn_cal_menu.grid(row=0, column=0, padx=(0, 3), pady=2, sticky="ew")
+        self.btn_cal_exit = ctk.CTkButton(grid, text="2. Back to Title", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("exit"), height=26)
+        self.btn_cal_exit.grid(row=0, column=1, padx=(3, 0), pady=2, sticky="ew")
+        self.btn_cal_stage = ctk.CTkButton(grid, text="3. Tap to Start", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("stage_icon"), height=26)
+        self.btn_cal_stage.grid(row=1, column=0, padx=(0, 3), pady=2, sticky="ew")
+        self.btn_cal_confirm = ctk.CTkButton(grid, text="4. Enter Stage", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("confirm_enter"), height=26)
+        self.btn_cal_confirm.grid(row=1, column=1, padx=(3, 0), pady=2, sticky="ew")
+
+        self.lbl_cal_status = ctk.CTkLabel(self.clicks_container, text="", font=ctk.CTkFont(size=10), text_color=COLOR_MUTED, wraplength=350, justify="left")
+        self.lbl_cal_status.pack(anchor="w", padx=0, pady=(2, 2))
+
+        delay_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        delay_row.pack(fill="x", padx=15, pady=(5, 5))
+        lbl_delay = ctk.CTkLabel(delay_row, text="Pause Delay (seconds):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        lbl_delay.pack(side="left", padx=(0, 10))
+        self.entry_pause_delay = ctk.CTkEntry(delay_row, width=60, fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11))
+        self.entry_pause_delay.pack(side="left")
+        self.entry_pause_delay.insert(0, str(self.pause_duration))
+        self.entry_pause_delay.bind("<KeyRelease>", self.on_pause_delay_typed)
+
+        safety_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        safety_row.pack(fill="x", padx=15, pady=(2, 5))
+        lbl_safety = ctk.CTkLabel(safety_row, text="Anti-Rollback Delay (s):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        lbl_safety.pack(side="left", padx=(0, 10))
+        self.entry_safety_delay = ctk.CTkEntry(safety_row, width=60, fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11))
+        self.entry_safety_delay.pack(side="left")
+        self.entry_safety_delay.insert(0, str(self.relog_safety_delay))
+        self.entry_safety_delay.bind("<KeyRelease>", self.on_safety_delay_typed)
+
+        max_idx_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        max_idx_row.pack(fill="x", padx=15, pady=(2, 5))
+        lbl_max_idx = ctk.CTkLabel(max_idx_row, text="Max Chest Index (Grade Match):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        lbl_max_idx.pack(side="left", padx=(0, 10))
+        self.entry_max_chest_index = ctk.CTkEntry(max_idx_row, width=60, fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11))
+        self.entry_max_chest_index.pack(side="left")
+        self.entry_max_chest_index.insert(0, str(self.max_chest_index))
+        self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
+
+        self.update_relogger_ui_visibility()
+
+    def build_console_tab(self) -> None:
+        self.console_frame = ctk.CTkFrame(self.tab_console, fg_color="transparent")
+        self.console_frame.pack(fill="both", expand=True, padx=12, pady=12)
+
+        self.feed_frame = ctk.CTkFrame(self.console_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.feed_frame.pack(fill="both", expand=True)
+
+        lbl = ctk.CTkLabel(self.feed_frame, text="Live Peek Feed", font=ctk.CTkFont(size=16, weight="bold"), text_color=COLOR_TEXT)
+        lbl.pack(anchor="w", padx=15, pady=(10, 5))
+
+        log_container = ctk.CTkFrame(self.feed_frame, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1)
+        log_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+
+        self.txt_log = tk.Text(
+            log_container,
+            bg=COLOR_BG,
+            fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT,
+            selectbackground=COLOR_PRIMARY,
+            selectforeground=COLOR_TEXT,
+            bd=0,
+            highlightthickness=0,
+            font=("Consolas", 9)
+        )
+        self.txt_log.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+
+        scrollbar = ctk.CTkScrollbar(log_container, command=self.txt_log.yview, button_color=COLOR_PRIMARY, button_hover_color=COLOR_HOVER)
+        scrollbar.pack(side="right", fill="y", padx=(5, 5), pady=10)
+        self.txt_log.configure(yscrollcommand=scrollbar.set)
+
+    def update_dashboard_stats(self) -> None:
+        if hasattr(self, "telemetry_scans_var"):
+            self.telemetry_scans_var.set(str(self.dashboard_scans_done))
+        if hasattr(self, "telemetry_loots_var"):
+            self.telemetry_loots_var.set(str(self.dashboard_loots_observed))
+        if hasattr(self, "telemetry_targets_var"):
+            self.telemetry_targets_var.set(str(self.dashboard_targets_found))
+        if hasattr(self, "telemetry_last_var"):
+            self.telemetry_last_var.set(self.dashboard_last_activity)
+
+    def set_dashboard_alert(self, message: str, severity: str = "info") -> None:
+        if not hasattr(self, "alert_banner_label"):
+            return
+        color_map = {
+            "info": COLOR_MUTED,
+            "warning": "#f39c12",
+            "success": "#2ecc71",
+            "error": COLOR_PRIMARY,
+        }
+        self.alert_banner_label.configure(text=message, text_color=color_map.get(severity, COLOR_MUTED))
+        if hasattr(self, "lbl_alert_icon") and hasattr(self, "placeholder_image"):
+            self.lbl_alert_icon.configure(image=self.placeholder_image)
+            try:
+                self.lbl_alert_icon._label.configure(image="")
+            except Exception:
+                pass
+            self.lbl_alert_icon._my_image_ref = self.placeholder_image
+
+    def update_dashboard_alert(self, item_name: str, grade: str | None = None, rarity_color: str | None = None, item_id: int | None = None) -> None:
+        if not hasattr(self, "alert_banner") or not hasattr(self, "alert_banner_label"):
+            return
+        color = rarity_color or GRADE_COLORS.get((grade or "").upper(), COLOR_PRIMARY)
+        self.alert_banner.configure(border_color=color, fg_color="#151515")
+        self.alert_banner_label.configure(text=f"Alert: {item_name or 'Target detected'} • {(grade or 'UNKNOWN').upper()}", text_color=color)
+        if hasattr(self, "lbl_alert_icon"):
+            if item_id is not None:
+                self.get_sprite_image(item_id, callback=lambda pil, w=self.lbl_alert_icon: self.set_widget_image(w, pil, (32, 32)))
+            elif hasattr(self, "placeholder_image"):
+                self.lbl_alert_icon.configure(image=self.placeholder_image)
+                try:
+                    self.lbl_alert_icon._label.configure(image="")
+                except Exception:
+                    pass
+                self.lbl_alert_icon._my_image_ref = self.placeholder_image
+
+    def load_or_build_sprite_mapping(self) -> None:
+        """Loads the ID-to-sprite mapping from a local JSON file or builds it in a background thread."""
+        mapping_path = ROOT / "id_to_sprite.json"
+        if mapping_path.exists():
+            try:
+                with open(mapping_path, "r", encoding="utf-8") as f:
+                    self.sprite_mapping = json.load(f)
+                return
+            except Exception:
+                pass
+
+        # If not found or failed, build it in a background thread
+        def build_thread():
+            try:
+                self.append_log("[SPRITES] Database mapping 'id_to_sprite.json' not found or invalid. Building from tbh.city...\n")
+                import urllib.request
+                req = urllib.request.Request(
+                    'https://tbh.city/items', 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                with urllib.request.urlopen(req, timeout=15) as response:
+                    html = response.read().decode('utf-8')
+                
+                chunks = re.split(r'\\\"id\\\"\s*:\s*', html)
+                if len(chunks) <= 1:
+                    chunks = re.split(r'\"id\"\s*:\s*', html)
+                
+                mapping = {}
+                for chunk in chunks[1:]:
+                    id_match = re.match(r'^(\d+)', chunk)
+                    if id_match:
+                        item_id = int(id_match.group(1))
+                        icon_match = re.search(r'\\\"icon\\\"\s*:\s*\\\"sprites/sharedassets0/([^\\\"]+?)\\\"', chunk)
+                        if not icon_match:
+                            icon_match = re.search(r'\"icon\"\s*:\s*\"sprites/sharedassets0/([^\"\s]+?)\"', chunk)
+                        if icon_match:
+                            sprite_name = icon_match.group(1)
+                            mapping[item_id] = sprite_name
+                
+                if mapping:
+                    with open(mapping_path, "w", encoding="utf-8") as f:
+                        json.dump(mapping, f, indent=4)
+                    self.sprite_mapping = mapping
+                    self.after(0, lambda: self.append_log(f"[SPRITES] Database mapping successfully built with {len(mapping)} items!\n"))
+            except Exception as e:
+                self.after(0, lambda: self.append_log(f"[WARNING] Failed to build sprite database: {e}\n"))
+
+        threading.Thread(target=build_thread, daemon=True).start()
+
+    def get_sprite_name(self, item_id: int) -> str:
+        s_id = str(item_id)
+        if hasattr(self, "sprite_mapping") and s_id in self.sprite_mapping:
+            return self.sprite_mapping[s_id]
+
+        if s_id.startswith('910'):
+            return "Item_910011.png"
+        elif s_id.startswith('920'):
+            return "Item_920011.png"
+        elif s_id.startswith('930'):
+            return "Item_930011.png"
+        return f"Item_{item_id}.png"
+
+    def set_widget_image(self, widget: ctk.CTkLabel, pil_img: Image.Image, size: tuple[int, int]) -> None:
+        """Safely creates a CTkImage in the main thread and configures the widget, storing a reference."""
+        try:
+            ctk_img = ctk.CTkImage(light_image=pil_img, dark_image=pil_img, size=size)
+            widget.configure(image=ctk_img)
+            widget._my_image_ref = ctk_img
+        except Exception as e:
+            self.append_log(f"[WARNING] Failed to set widget image: {e}\n")
+
+    def get_sprite_image(self, item_id: int, callback = None) -> None:
+        """Asynchronously loads an item sprite from tbh.city or local cache and returns a PIL Image."""
+        sprite_name = self.get_sprite_name(item_id)
+        cache_dir = ROOT / "cache_sprites"
+        cache_dir.mkdir(exist_ok=True)
+        local_path = cache_dir / sprite_name
+        
+        # 1. If it exists in cache, load immediately
+        if local_path.exists():
+            try:
+                pil_img = Image.open(local_path)
+                pil_img.load()  # Read pixel data into memory immediately
+                if callback:
+                    callback(pil_img)
+                return
+            except Exception:
+                try:
+                    local_path.unlink()
+                except Exception:
+                    pass
+
+        # 2. Download from tbh.city in a background thread
+        def download_thread():
+            url = f"https://tbh.city/sprites/sharedassets0/{sprite_name}"
+            try:
+                import urllib.request
+                req = urllib.request.Request(
+                    url, 
+                    headers={'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                )
+                with urllib.request.urlopen(req, timeout=8) as response:
+                    data = response.read()
+                
+                local_path.write_bytes(data)
+                
+                pil_img = Image.open(local_path)
+                pil_img.load()  # Load data into memory before switching threads
+                if callback:
+                    self.after(0, lambda: callback(pil_img))
+            except Exception:
+                pass
+
+        threading.Thread(target=download_thread, daemon=True).start()
+
+    def update_upcoming_drops(self, all_item_ids: list[int] | None = None, triggered_item_id: int | None = None, chest_ids: list[int | None] | None = None) -> None:
+        """Update the Upcoming Important Drops cards with items from the current roll.
+        
+        Extracts important items from the roll that match the tracked rarities (IMMORTAL, LEGENDARY, RARE, BEYOND, ARCANA).
+        """
+        if not hasattr(self, "upcoming_card_widgets"):
+            return
+        
+        try:
+            # Reset all cards to "No drop yet" to ensure dynamism
+            for widgets in self.upcoming_card_widgets.values():
+                widgets["lbl_name"].configure(text="No drop yet")
+                
+                # Clear image from CTk widget and set to placeholder
+                widgets["lbl_item_icon"].configure(image=self.placeholder_image, text="")
+                # CRITICAL: Force clear the underlying standard Tkinter label's image reference
+                try:
+                    widgets["lbl_item_icon"]._label.configure(image="")
+                except Exception:
+                    pass
+                widgets["lbl_item_icon"]._my_image_ref = self.placeholder_image
+                
+                # Clear chest image from CTk widget and set to placeholder
+                widgets["lbl_chest_icon"].configure(image=self.placeholder_chest_image, text="")
+                # CRITICAL: Force clear the underlying standard Tkinter label's image reference
+                try:
+                    widgets["lbl_chest_icon"]._label.configure(image="")
+                except Exception:
+                    pass
+                widgets["lbl_chest_icon"]._my_image_ref = self.placeholder_chest_image
+                
+                widgets["chest_frame"].pack_forget()
+
+            if hasattr(self, "next_drop_var"):
+                self.next_drop_var.set("No valuable drops")
+                if hasattr(self, "lbl_next_drop"):
+                    self.lbl_next_drop.configure(text_color=COLOR_MUTED)
+                if hasattr(self, "lbl_next_drop_icon"):
+                    self.lbl_next_drop_icon.configure(image=self.placeholder_image)
+                    try:
+                        self.lbl_next_drop_icon._label.configure(image="")
+                    except Exception:
+                        pass
+                    self.lbl_next_drop_icon._my_image_ref = self.placeholder_image
+
+            if not all_item_ids:
+                return
+                
+            if not chest_ids or len(chest_ids) != len(all_item_ids):
+                chest_ids = [None] * len(all_item_ids)
+            
+            # Track which rarities have been filled (to avoid duplicates)
+            filled_rarities = set()
+            
+            # Iterate through all drops in the roll
+            for item_id, chest_id in zip(all_item_ids, chest_ids):
+                info = self.get_item_info_by_id(item_id) or {}
+                grade = info.get("grade", "COMMON").upper()
+                
+                # Only process if this grade is one of our tracked rarities and not already filled
+                if grade in self.upcoming_card_widgets and grade not in filled_rarities:
+                    # Skip soulstones
+                    name = self.get_item_name(info, "").lower()
+                    if "soulstone" in name or "soul stone" in name:
+                        continue
+                    
+                    # Update the card for this rarity
+                    item_name = self.get_item_name(info, "Unknown")
+                    widgets = self.upcoming_card_widgets[grade]
+                    widgets["lbl_name"].configure(text=item_name)
+                    
+                    # Fetch and load item sprite (main thread instantiation)
+                    self.get_sprite_image(item_id, callback=lambda pil, w=widgets["lbl_item_icon"]: self.set_widget_image(w, pil, (32, 32)))
+                    
+                    # If chest info is present, display chest sprite and name
+                    if chest_id is not None:
+                        c_info = self.get_item_info_by_id(chest_id) or {}
+                        c_name = self.get_item_name(c_info, "Unknown Chest")
+                        widgets["lbl_chest_name"].configure(text=c_name)
+                        self.get_sprite_image(chest_id, callback=lambda pil, w=widgets["lbl_chest_icon"]: self.set_widget_image(w, pil, (16, 16)))
+                        widgets["chest_frame"].pack(side="left", fill="x", anchor="w", pady=(2, 0))
+                    
+                    filled_rarities.add(grade)
+
+            # Update Next Valuable Drop banner based on the highest grade found in the current scan
+            highest_grade_item = None
+            highest_grade_val = -1
+            grade_values = {
+                "COMMON": 0, "UNCOMMON": 1, "RARE": 2, "LEGENDARY": 3,
+                "BEYOND": 4, "IMMORTAL": 5, "ARCANA": 6, "CELESTIAL": 7,
+                "DIVINE": 8, "COSMIC": 9
+            }
+            for item_id in all_item_ids:
+                info = self.get_item_info_by_id(item_id) or {}
+                name = self.get_item_name(info, "").lower()
+                if "soulstone" in name or "soul stone" in name:
+                    continue
+                grade = info.get("grade", "COMMON").upper()
+                val = grade_values.get(grade, 0)
+                if val > highest_grade_val:
+                    highest_grade_val = val
+                    highest_grade_item = info
+
+            if highest_grade_item and hasattr(self, "next_drop_var"):
+                name = self.get_item_name(highest_grade_item, "Unknown")
+                grade = highest_grade_item.get("grade", "COMMON")
+                item_id = highest_grade_item.get("id")
+                self.next_drop_var.set(f"{name} [{grade}]")
+                if hasattr(self, "lbl_next_drop"):
+                    color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
+                    self.lbl_next_drop.configure(text_color=color)
+                if hasattr(self, "lbl_next_drop_icon") and item_id is not None:
+                    self.get_sprite_image(item_id, callback=lambda pil, w=self.lbl_next_drop_icon: self.set_widget_image(w, pil, (32, 32)))
+            elif hasattr(self, "next_drop_var"):
+                self.next_drop_var.set("No valuable drops")
+                if hasattr(self, "lbl_next_drop"):
+                    self.lbl_next_drop.configure(text_color=COLOR_MUTED)
+                if hasattr(self, "lbl_next_drop_icon"):
+                    self.lbl_next_drop_icon.configure(image=self.placeholder_image)
+                    try:
+                        self.lbl_next_drop_icon._label.configure(image="")
+                    except Exception:
+                        pass
+                    self.lbl_next_drop_icon._my_image_ref = self.placeholder_image
+        except Exception as e:
+            import traceback
+            self.append_log(f"\n[CRITICAL ERROR] Error in update_upcoming_drops: {e}\n{traceback.format_exc()}\n")
+
+    def show_tab(self, name: str) -> None:
+        for key, frame in self.tab_frames.items():
+            frame.pack_forget()
+        self.tab_frames[name].pack(fill="both", expand=True)
+        for btn_name, btn in self.sidebar_buttons.items():
+            btn.configure(fg_color="transparent" if btn_name != name else COLOR_PRIMARY)
+
+    def build_left_panel(self) -> None:
+        self.left_content_frame.grid_columnconfigure(0, weight=1)
+        self.left_content_frame.grid_columnconfigure(1, weight=1)
+        self.left_content_frame.grid_rowconfigure(0, weight=0)
+        self.left_content_frame.grid_rowconfigure(1, weight=1, minsize=360)
+
+        # 1. Proxy Controls Panel
+        self.proxy_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.proxy_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+ 
+        lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl.pack(anchor="w", padx=15, pady=(8, 10))
+ 
+        self.btn_proxy = ctk.CTkButton(
+            self.proxy_frame,
+            text="Start Peeker Proxy",
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.toggle_proxy,
+            height=36
+        )
+        self.btn_proxy.pack(fill="x", padx=15, pady=(0, 8))
+ 
+        self.btn_trust_cert = ctk.CTkButton(
+            self.proxy_frame,
+            text="Trust CA Certificate",
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.install_cert_automatically,
+            height=28
+        )
+ 
+        self.lbl_proxy_status = ctk.CTkLabel(
+            self.proxy_frame,
+            text="Status: Stopped",
+            text_color=COLOR_MUTED,
+            font=ctk.CTkFont(size=12, slant="italic")
+        )
+        self.lbl_proxy_status.pack(anchor="w", padx=15, pady=(0, 4))
+        self.btn_trust_cert.pack(fill="x", padx=15, pady=(0, 8))
+ 
+        # 2. Relogger Setup Panel
+        self.calib_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.calib_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+ 
+        lbl_cal = ctk.CTkLabel(self.calib_frame, text="Auto-Relogger Setup", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl_cal.pack(anchor="w", padx=15, pady=(8, 5))
+ 
+        # Relogger Method Selector
+        self.relogger_method_var = ctk.StringVar(value="Process Restart" if self.relogger_method == "process_restart" else "Mouse Clicks")
+        
+        self.seg_method = ctk.CTkSegmentedButton(
+            self.calib_frame,
+            values=["Process Restart", "Mouse Clicks"],
+            variable=self.relogger_method_var,
+            command=self.on_relogger_method_changed,
+            selected_color=COLOR_PRIMARY,
+            selected_hover_color=COLOR_HOVER,
+            unselected_color=COLOR_SECONDARY,
+            unselected_hover_color=COLOR_SEC_HOVER,
+            text_color=COLOR_TEXT
+        )
+        self.seg_method.pack(fill="x", padx=15, pady=5)
+ 
+        # 2a. Process Restart UI Container
+        self.restart_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        
+        lbl_path = ctk.CTkLabel(self.restart_container, text="TaskbarHero.exe Path:", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        lbl_path.pack(anchor="w", padx=0, pady=(5, 2))
+        
+        path_row = ctk.CTkFrame(self.restart_container, fg_color="transparent")
+        path_row.pack(fill="x")
+        
+        self.entry_game_path = ctk.CTkEntry(
+            path_row,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_game_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.entry_game_path.insert(0, self.game_path)
+        self.entry_game_path.bind("<KeyRelease>", self.on_game_path_typed)
+        
+        self.btn_browse = ctk.CTkButton(
+            path_row,
+            text="Browse",
+            width=60,
+            height=28,
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.browse_game_path
+        )
+        self.btn_browse.pack(side="right")
+ 
+        # 2b. Mouse Clicks UI Container
+        self.clicks_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        
+        lbl_inst = ctk.CTkLabel(
+            self.clicks_container,
+            text="Click a button below, hover over the game item, then press F8 to save.",
+            font=ctk.CTkFont(size=10, slant="italic"),
+            text_color=COLOR_MUTED,
+            wraplength=350,
+            justify="left"
+        )
+        lbl_inst.pack(anchor="w", padx=0, pady=(0, 5))
+ 
+        grid = ctk.CTkFrame(self.clicks_container, fg_color="transparent")
+        grid.pack(fill="x", pady=2)
+        grid.grid_columnconfigure(0, weight=1)
+        grid.grid_columnconfigure(1, weight=1)
+ 
+        self.btn_cal_menu = ctk.CTkButton(
+            grid, text="1. Menu Button", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=lambda: self.start_calibration("menu"), height=26
+        )
+        self.btn_cal_menu.grid(row=0, column=0, padx=(0, 3), pady=2, sticky="ew")
+ 
+        self.btn_cal_exit = ctk.CTkButton(
+            grid, text="2. Back to Title", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=lambda: self.start_calibration("exit"), height=26
+        )
+        self.btn_cal_exit.grid(row=0, column=1, padx=(3, 0), pady=2, sticky="ew")
+ 
+        self.btn_cal_stage = ctk.CTkButton(
+            grid, text="3. Tap to Start", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=lambda: self.start_calibration("stage_icon"), height=26
+        )
+        self.btn_cal_stage.grid(row=1, column=0, padx=(0, 3), pady=2, sticky="ew")
+ 
+        self.btn_cal_confirm = ctk.CTkButton(
+            grid, text="4. Enter Stage", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=lambda: self.start_calibration("confirm_enter"), height=26
+        )
+        self.btn_cal_confirm.grid(row=1, column=1, padx=(3, 0), pady=2, sticky="ew")
+ 
+        self.lbl_cal_status = ctk.CTkLabel(
+            self.clicks_container,
+            text="",
+            font=ctk.CTkFont(size=10),
+            text_color=COLOR_MUTED,
+            wraplength=350,
+            justify="left"
+        )
+        self.lbl_cal_status.pack(anchor="w", padx=0, pady=(2, 2))
+        
+        # 2c. Pause Delay Input
+        delay_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        delay_row.pack(fill="x", padx=15, pady=(5, 5))
+        
+        lbl_delay = ctk.CTkLabel(
+            delay_row, text="Pause Delay (seconds):", 
+            font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED
+        )
+        lbl_delay.pack(side="left", padx=(0, 10))
+        
+        self.entry_pause_delay = ctk.CTkEntry(
+            delay_row,
+            width=60,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_pause_delay.pack(side="left")
+        self.entry_pause_delay.insert(0, str(self.pause_duration))
+        self.entry_pause_delay.bind("<KeyRelease>", self.on_pause_delay_typed)
+        
+        # 2d. Safety Delay Input (anti-rollback)
+        safety_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        safety_row.pack(fill="x", padx=15, pady=(2, 5))
+        
+        lbl_safety = ctk.CTkLabel(
+            safety_row, text="Anti-Rollback Delay (s):", 
+            font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED
+        )
+        lbl_safety.pack(side="left", padx=(0, 10))
+        
+        self.entry_safety_delay = ctk.CTkEntry(
+            safety_row,
+            width=60,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_safety_delay.pack(side="left")
+        self.entry_safety_delay.insert(0, str(self.relog_safety_delay))
+        self.entry_safety_delay.bind("<KeyRelease>", self.on_safety_delay_typed)
+        
+        # 2e. Max Chest Index Input
+        max_idx_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        max_idx_row.pack(fill="x", padx=15, pady=(2, 5))
+        
+        lbl_max_idx = ctk.CTkLabel(
+            max_idx_row, text="Max Chest Index (Grade Match):", 
+            font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED
+        )
+        lbl_max_idx.pack(side="left", padx=(0, 10))
+        
+        self.entry_max_chest_index = ctk.CTkEntry(
+            max_idx_row,
+            width=60,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_max_chest_index.pack(side="left")
+        self.entry_max_chest_index.insert(0, str(self.max_chest_index))
+        self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
+        
+        # Show/Hide correct container initially
+        self.update_relogger_ui_visibility()
+ 
+        # 3. Auto-Relogger Actions Frame
+        self.bot_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.bot_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+        self.bot_frame.configure(height=360)
+ 
+        lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl_bot.pack(anchor="w", padx=15, pady=(8, 10))
+ 
+        self.btn_bot = ctk.CTkButton(
+            self.bot_frame,
+            text="Start Auto-Relogger",
+            fg_color="#2ecc71",
+            hover_color="#27ae60",
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.toggle_relogger,
+            height=36
+        )
+        self.btn_bot.pack(fill="x", padx=15, pady=(0, 8))
+ 
+        self.btn_force_relaunch = ctk.CTkButton(
+            self.bot_frame,
+            text="Force Relaunch Game",
+            fg_color="#3498db",
+            hover_color="#2980b9",
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.force_relaunch_game,
+            height=36
+        )
+        self.btn_force_relaunch.pack(fill="x", padx=15, pady=(0, 8))
+ 
+        self.btn_item_collected = ctk.CTkButton(
+            self.bot_frame,
+            text="✅ Item Collected → Relog Now",
+            fg_color="#e67e22",
+            hover_color="#d35400",
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.skip_to_safety_relog,
+            height=36
+        )
+        # Hidden by default, shown when countdown is active
+        self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_item_collected.pack_forget()
+ 
+        self.lbl_bot_status = ctk.CTkLabel(
+            self.bot_frame,
+            text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time",
+            text_color=COLOR_MUTED,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            justify="left"
+        )
+        self.lbl_bot_status.pack(anchor="w", padx=15, pady=(0, 8))
+ 
+        # 4. Tabbed Filter Panel (Specific Items vs Grade Rarity)
+        self.filter_tabview = ctk.CTkTabview(
+            self.left_content_frame,
+            fg_color=COLOR_FRAME,
+            segmented_button_selected_color=COLOR_PRIMARY,
+            segmented_button_selected_hover_color=COLOR_HOVER,
+            segmented_button_unselected_color=COLOR_SECONDARY,
+            segmented_button_unselected_hover_color=COLOR_SEC_HOVER,
+            text_color=COLOR_TEXT
+        )
+        self.filter_tabview.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+        self.filter_tabview.grid_propagate(False)
+        self.filter_tabview.configure(height=360)
+        
+        self.tab_items = self.filter_tabview.add("Item Targets")
+        self.tab_grades = self.filter_tabview.add("Grade Targets")
+        self.tab_notifications = self.filter_tabview.add("Notifications")
+ 
+        self.build_item_filters_tab()
+        self.build_grade_filters_tab()
+        self.build_notifications_tab()
+ 
+    def build_item_filters_tab(self) -> None:
+        # Main content area for the tab, expanded to fill the full panel height
+        scroll_frame = ctk.CTkFrame(
+            self.tab_items,
+            fg_color="transparent"
+        )
+        self.tab_items.configure(height=360)
+        scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+ 
+        # Search box
+        search_box = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        search_box.pack(fill="x", padx=5, pady=(5, 5))
+ 
+        self.entry_search = ctk.CTkEntry(
+            search_box, placeholder_text="Item Name (e.g. Dimensional)",
+            fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT
+        )
+        self.entry_search.pack(side="left", fill="x", expand=True, padx=(0, 5))
+ 
+        self.btn_search = ctk.CTkButton(
+            search_box, text="Search", width=65, fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=self.search_items
+        )
+        self.btn_search.pack(side="right")
+ 
+        # Search Results Selection Area
+        self.combo_results = ctk.CTkComboBox(
+            scroll_frame, values=["Search and select an item..."],
+            fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT,
+            dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
+        )
+        self.combo_results.pack(fill="x", padx=5, pady=5)
+ 
+        self.btn_add_filter = ctk.CTkButton(
+            scroll_frame, text="Add Selection to Targets",
+            fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=self.add_target_item
+        )
+        self.btn_add_filter.pack(fill="x", padx=5, pady=(5, 10))
+ 
+        # Target Items List Frame
+        self.target_list_lbl = ctk.CTkLabel(scroll_frame, text="Active Target List:", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        self.target_list_lbl.pack(anchor="w", padx=5, pady=(5, 2))
+
+        self.target_box_container = ctk.CTkFrame(
+            scroll_frame,
+            fg_color="transparent",
+            height=210
+        )
+        self.target_box_container.pack(fill="x", padx=5, pady=(0, 5))
+        self.target_box_container.pack_propagate(False)
+ 
+        self.target_box = ctk.CTkTextbox(
+            self.target_box_container, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1,
+            text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=18
+        )
+        self.target_box.pack(fill="both", expand=True)
+ 
+        # Remove Target Area
+        remove_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        remove_frame.pack(fill="x", padx=5, pady=(5, 5))
+        
+        self.combo_active_targets = ctk.CTkComboBox(
+            remove_frame, values=["Select a target to remove..."],
+            fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT,
+            dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
+        )
+        self.combo_active_targets.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        
+        self.btn_remove_target = ctk.CTkButton(
+            remove_frame, text="Remove Target",
+            fg_color="#e67e22", hover_color="#d35400",
+            text_color=COLOR_TEXT,
+            command=self.remove_target_item,
+            width=120
+        )
+        self.btn_remove_target.pack(side="right")
+
+        self.btn_clear_filters = ctk.CTkButton(
+            scroll_frame, text="Clear Target List",
+            fg_color="#e74c3c", hover_color="#c0392b",
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=12, weight="bold"),
+            command=self.clear_target_items,
+            height=32
+        )
+        self.btn_clear_filters.pack(fill="x", padx=5, pady=(5, 10))
+        self.update_target_box()
+ 
+    def build_grade_filters_tab(self) -> None:
+        # Main content area for the tab, expanded to fill the full panel height
+        scroll_frame = ctk.CTkFrame(
+            self.tab_grades,
+            fg_color="transparent"
+        )
+        scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+ 
+        lbl_grade_title = ctk.CTkLabel(
+            scroll_frame,
+            text="Stop relogger if ANY item of checked rarity drops:",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_grade_title.pack(anchor="w", padx=5, pady=(5, 10))
+ 
+        # Checkboxes for grades
+        self.grade_vars = {}
+        grades_list = ["RARE", "BEYOND", "LEGENDARY", "IMMORTAL", "ARCANA", "CELESTIAL", "DIVINE", "COSMIC"]
+        
+        for g in grades_list:
+            var = ctk.BooleanVar(value=(g in self.target_grades))
+            self.grade_vars[g] = var
+            
+            cb = ctk.CTkCheckBox(
+                scroll_frame,
+                text=g.capitalize(),
+                variable=var,
+                command=self.save_grades_config,
+                fg_color=COLOR_PRIMARY,
+                hover_color=COLOR_HOVER,
+                border_color=COLOR_BORDER,
+                text_color=COLOR_TEXT
+            )
+            cb.pack(anchor="w", padx=15, pady=5)
+ 
+        lbl_except = ctk.CTkLabel(
+            scroll_frame,
+            text="⚠️ Note: Soulstones are automatically EXCLUDED from grade-based matching to prevent useless stops.",
+            font=ctk.CTkFont(size=11, slant="italic"),
+            text_color=COLOR_PRIMARY,
+            wraplength=300,
+            justify="left"
+        )
+        lbl_except.pack(anchor="w", padx=5, pady=(15, 5))
+ 
+    def build_notifications_tab(self) -> None:
+        # Main content area for the tab, expanded to fill the full panel height
+        scroll_frame = ctk.CTkFrame(
+            self.tab_notifications,
+            fg_color="transparent"
+        )
+        scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
+ 
+        lbl_discord_title = ctk.CTkLabel(
+            scroll_frame,
+            text="Discord Webhook Notifications",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_discord_title.pack(anchor="w", padx=5, pady=(5, 10))
+ 
+        # Checkbox to enable/disable Discord alerts
+        self.discord_notify_var = ctk.BooleanVar(value=self.discord_notify_enabled)
+        cb_notify = ctk.CTkCheckBox(
+            scroll_frame,
+            text="Enable Discord Notifications",
+            variable=self.discord_notify_var,
+            command=self.on_discord_notify_toggled,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT
+        )
+        cb_notify.pack(anchor="w", padx=15, pady=5)
+ 
+        # Discord Webhook URL Entry
+        lbl_webhook_url = ctk.CTkLabel(
+            scroll_frame,
+            text="Discord Webhook URL:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_webhook_url.pack(anchor="w", padx=5, pady=(10, 2))
+ 
+        self.entry_webhook_url = ctk.CTkEntry(
+            scroll_frame,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="https://discord.com/api/webhooks/...",
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_webhook_url.pack(fill="x", padx=5, pady=5)
+        self.entry_webhook_url.insert(0, self.discord_webhook_url)
+        self.entry_webhook_url.bind("<KeyRelease>", self.on_webhook_url_typed)
+ 
+        # Discord User ID Entry (for @mention)
+        lbl_user_id = ctk.CTkLabel(
+            scroll_frame,
+            text="Discord User ID (for @mention):",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_user_id.pack(anchor="w", padx=5, pady=(5, 2))
+ 
+        self.entry_discord_user_id = ctk.CTkEntry(
+            scroll_frame,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="Right-click profile → Copy User ID",
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_discord_user_id.pack(fill="x", padx=5, pady=2)
+        self.entry_discord_user_id.insert(0, self.discord_user_id)
+        self.entry_discord_user_id.bind("<KeyRelease>", self.on_discord_user_id_typed)
+ 
+        # Test notification button
+        self.btn_test_webhook = ctk.CTkButton(
+            scroll_frame,
+            text="Send Test Notification",
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.send_test_discord_notification
+        )
+        self.btn_test_webhook.pack(fill="x", padx=5, pady=(15, 5))
+ 
+        # Divider Line
+        divider = ctk.CTkFrame(scroll_frame, height=2, fg_color=COLOR_BORDER)
+        divider.pack(fill="x", pady=15)
+ 
+        lbl_trainer_title = ctk.CTkLabel(
+            scroll_frame,
+            text="TBH Trainer Automation",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_trainer_title.pack(anchor="w", padx=5, pady=(5, 10))
+ 
+        # Checkbox to enable/disable Trainer Auto Launch
+        self.trainer_auto_launch_var = ctk.BooleanVar(value=self.trainer_auto_launch)
+        cb_trainer = ctk.CTkCheckBox(
+            scroll_frame,
+            text="Auto-launch Trainer on Target Found",
+            variable=self.trainer_auto_launch_var,
+            command=self.on_trainer_auto_launch_toggled,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT
+        )
+        cb_trainer.pack(anchor="w", padx=15, pady=5)
+ 
+        # Trainer Path Entry
+        lbl_trainer_path = ctk.CTkLabel(
+            scroll_frame,
+            text="TBH Trainer.exe Path:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_trainer_path.pack(anchor="w", padx=5, pady=(10, 2))
+ 
+        trainer_path_row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        trainer_path_row.pack(fill="x", padx=5)
+ 
+        self.entry_trainer_path = ctk.CTkEntry(
+            trainer_path_row,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_trainer_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.entry_trainer_path.insert(0, self.trainer_path)
+        self.entry_trainer_path.bind("<KeyRelease>", self.on_trainer_path_typed)
+ 
+        self.btn_browse_trainer = ctk.CTkButton(
+            trainer_path_row,
+            text="Browse",
+            width=60,
+            height=28,
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.browse_trainer_path
+        )
+        self.btn_browse_trainer.pack(side="right")
+ 
+    def on_trainer_auto_launch_toggled(self) -> None:
+        self.trainer_auto_launch = self.trainer_auto_launch_var.get()
+        self.save_peeker_config()
+        self.append_log(f"[CONFIG] Trainer auto-launch enabled: {self.trainer_auto_launch}\n")
+ 
+    def on_trainer_path_typed(self, event: Any) -> None:
+        self.trainer_path = self.entry_trainer_path.get().strip()
+        self.save_peeker_config()
+ 
+    def browse_trainer_path(self) -> None:
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select TBH Trainer.exe",
+            filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
+        )
+        if path:
+            self.trainer_path = os.path.normpath(path)
+            self.entry_trainer_path.delete(0, "end")
+            self.entry_trainer_path.insert(0, self.trainer_path)
+            self.save_peeker_config()
+            self.append_log(f"[CONFIG] Trainer path updated to: {self.trainer_path}\n")
+ 
+    def on_discord_notify_toggled(self) -> None:
+        self.discord_notify_enabled = self.discord_notify_var.get()
+        self.save_peeker_config()
+        self.append_log(f"[CONFIG] Discord notification enabled: {self.discord_notify_enabled}\n")
+ 
+    def on_webhook_url_typed(self, event: Any) -> None:
+        self.discord_webhook_url = self.entry_webhook_url.get().strip()
+        self.save_peeker_config()
+ 
+    def on_discord_user_id_typed(self, event: Any) -> None:
+        self.discord_user_id = self.entry_discord_user_id.get().strip()
+        self.save_peeker_config()
+ 
+    def send_test_discord_notification(self) -> None:
+        url = self.entry_webhook_url.get().strip()
+        if not url:
+            self.append_log("[DISCORD] Cannot send test notification: Webhook URL is empty.\n")
+            return
+        
+        self.append_log("[DISCORD] Sending test notification...\n")
+        
+        def run_test():
+            payload = {
+                "username": "TBH Chest Peeker",
+                "content": "🔔 This is a test notification from your TBH Chest Peeker! Your Webhook configuration is working correctly."
+            }
+            success, msg = self.post_to_discord_webhook(url, payload)
+            if success:
+                self.after(0, lambda: self.append_log("[DISCORD] Test notification sent successfully!\n"))
+            else:
+                self.after(0, lambda: self.append_log(f"[DISCORD] [ERROR] Failed to send test notification: {msg}\n"))
+ 
+        threading.Thread(target=run_test, daemon=True).start()
+ 
+    def post_to_discord_webhook(self, url: str, payload: dict) -> tuple[bool, str]:
+        import urllib.request
+        import urllib.error
+        
+        try:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={
+                    "Content-Type": "application/json",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=10) as response:
+                response.read()
+            return True, "Success"
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP Error {e.code}: {e.reason}"
+        except urllib.error.URLError as e:
+            return False, f"URL Error: {e.reason}"
+        except Exception as e:
+            return False, str(e)
+ 
+    def notify_discord_match(self, item_id: int, item_name: str, grade: str, action_type: str) -> None:
+        if not self.discord_notify_enabled or not self.discord_webhook_url:
+            return
+        
+        import datetime
+        
+        # Color based on item grade
+        color_hex_map = {
+            "RARE": 0x3498db,      # Blue
+            "BEYOND": 0x1abc9c,    # Dark Cyan
+            "LEGENDARY": 0xe67e22, # Orange
+            "IMMORTAL": 0xe74c3c,  # Red
+            "ARCANA": 0x9b59b6,    # Purple
+            "CELESTIAL": 0x00d2d3, # Cyan/Light Blue
+            "DIVINE": 0xf1c40f,    # Gold
+            "COSMIC": 0xfd79a8,    # Pink
+            "BOSS": 0x34495e,      # Dark Gray
+        }
+        color = color_hex_map.get(grade.upper(), 0xbdc3c7) # default gray
+        
+        title = "🎯 Target Item Filter Matched!"
+        if action_type == "chests":
+            desc = f"**Item Found in Upcoming Chests!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger has paused to let you collect it.*"
+        elif action_type == "direct":
+            desc = f"**Item Collected (Direct Drop)!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
+        elif action_type == "synthesis":
+            desc = f"**Item Collected (Synthesis)!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
+        else:
+            desc = f"**Item Detected!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}"
+            
+        payload = {
+            "username": "TBH Chest Peeker",
+            "embeds": [
+                {
+                    "title": title,
+                    "description": desc,
+                    "color": color,
+                    "timestamp": datetime.datetime.utcnow().isoformat() + "Z"
+                }
+            ]
+        }
+        
+        # Add @mention if Discord User ID is set
+        if self.discord_user_id:
+            payload["content"] = f"<@{self.discord_user_id}>"
+        
+        def run_notify():
+            success, msg = self.post_to_discord_webhook(self.discord_webhook_url, payload)
+            if not success:
+                self.after(0, lambda: self.append_log(f"[DISCORD] [ERROR] Failed to send webhook alert: {msg}\n"))
+                
+        threading.Thread(target=run_notify, daemon=True).start()
+ 
+    def build_right_panel(self) -> None:
+        # Live Stage Peek Feed
+        self.feed_frame = ctk.CTkFrame(self.right_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.feed_frame.pack(fill="both", expand=True, pady=(0, 10))
+ 
+        lbl = ctk.CTkLabel(
+            self.feed_frame, 
+            text="Live Peek Feed", 
+            font=ctk.CTkFont(size=16, weight="bold"), 
+            text_color=COLOR_TEXT
+        )
+        lbl.pack(anchor="w", padx=15, pady=(10, 5))
+ 
+        # Standard Tkinter Text wrapped in CTkFrame for styling, and scrolled with CTkScrollbar
+        log_container = ctk.CTkFrame(self.feed_frame, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1)
+        log_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+ 
+        self.txt_log = tk.Text(
+            log_container,
+            bg=COLOR_BG,
+            fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT,
+            selectbackground=COLOR_PRIMARY,
+            selectforeground=COLOR_TEXT,
+            bd=0,
+            highlightthickness=0,
+            font=("Consolas", 9)
+        )
+        self.txt_log.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+ 
+        scrollbar = ctk.CTkScrollbar(log_container, command=self.txt_log.yview, button_color=COLOR_PRIMARY, button_hover_color=COLOR_HOVER)
+        scrollbar.pack(side="right", fill="y", padx=(5, 5), pady=10)
+        self.txt_log.configure(yscrollcommand=scrollbar.set)
+ 
+    # =====================================================================
+    # Log / Status / Label Updaters
+    # =====================================================================
+    def append_log(self, text: str) -> None:
+        """Appends plain logs to the Live Feed terminal widget."""
+        self.txt_log.insert("end", text)
+        self.txt_log.see("end")
+ 
+    def append_colored_drop(self, idx: int, name: str, grade: str, is_chest: bool = False) -> None:
+        """Appends item display lines formatted using color markers."""
+        color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
+        lbl_type = "Chest" if is_chest else "Drop"
+        tag_name = f"grade_{grade.upper()}"
+        
+        # Configure tag color once (Tkinter handles duplicates safely)
+        self.txt_log.tag_config(tag_name, foreground=color)
+        
+        if is_chest:
+            self.txt_log.insert("end", f"[{idx}] {lbl_type}: ")
+            self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
+        else:
+            self.txt_log.insert("end", "   └─ Drop: ")
+            self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
+            
+        self.txt_log.see("end")
+ 
+    def update_cal_labels(self) -> None:
+        if not hasattr(self, 'lbl_cal_status') or not self.lbl_cal_status.winfo_exists():
+            return
+        menu_st = "OK" if self.coords["menu"] else "No"
+        exit_st = "OK" if self.coords["exit"] else "No"
+        stage_st = "OK" if self.coords["stage_icon"] else "No"
+        conf_st = "OK" if self.coords["confirm_enter"] else "No"
+        self.lbl_cal_status.configure(
+            text=f"Coords: Menu ({menu_st}), Title ({exit_st}), Start ({stage_st}), Enter ({conf_st})"
+        )
+ 
+    def on_relogger_method_changed(self, method: str) -> None:
+        if method == "Process Restart":
+            self.relogger_method = "process_restart"
+        else:
+            self.relogger_method = "mouse_clicks"
+        self.save_peeker_config()
+        self.update_relogger_ui_visibility()
+ 
+    def update_relogger_ui_visibility(self) -> None:
+        if self.relogger_method == "process_restart":
+            if hasattr(self, 'clicks_container') and self.clicks_container.winfo_exists():
+                self.clicks_container.pack_forget()
+            if hasattr(self, 'restart_container') and self.restart_container.winfo_exists():
+                self.restart_container.pack(fill="x", padx=15, pady=5)
+        else:
+            if hasattr(self, 'restart_container') and self.restart_container.winfo_exists():
+                self.restart_container.pack_forget()
+            if hasattr(self, 'clicks_container') and self.clicks_container.winfo_exists():
+                self.clicks_container.pack(fill="x", padx=15, pady=5)
+                self.update_cal_labels()
+ 
+    def browse_game_path(self) -> None:
+        from tkinter import filedialog
+        initial_dir = "C:\\"
+        if self.game_path and os.path.exists(os.path.dirname(self.game_path)):
+            initial_dir = os.path.dirname(self.game_path)
+        path = filedialog.askopenfilename(
+            title="Select TaskbarHero.exe",
+            initialdir=initial_dir,
+            filetypes=[("Executable Files", "*.exe")]
+        )
+        if path:
+            self.game_path = os.path.normpath(path)
+            self.entry_game_path.delete(0, "end")
+            self.entry_game_path.insert(0, self.game_path)
+            self.save_peeker_config()
+            self.append_log(f"[CONFIG] Game path updated to: {self.game_path}\n")
+ 
+    def on_game_path_typed(self, event: Any) -> None:
+        self.game_path = self.entry_game_path.get().strip()
+        self.save_peeker_config()
+ 
+    def on_pause_delay_typed(self, event: Any) -> None:
+        try:
+            val = int(self.entry_pause_delay.get().strip())
+            if val > 0:
+                self.pause_duration = val
+                self.save_peeker_config()
+        except Exception:
+            pass
+ 
+    def on_safety_delay_typed(self, event: Any) -> None:
+        try:
+            val = int(self.entry_safety_delay.get().strip())
+            if val >= 0:
+                self.relog_safety_delay = val
+                self.save_peeker_config()
+        except Exception:
+            pass
+ 
+    def on_max_chest_index_typed(self, event: Any) -> None:
+        try:
+            val = int(self.entry_max_chest_index.get().strip())
+            if val >= 0:
+                self.max_chest_index = val
+                self.save_peeker_config()
+        except Exception:
+            pass
+ 
+    def update_target_box(self) -> None:
+        self.target_box.configure(state="normal")
+        self.target_box.delete("1.0", "end")
+        active_vals = []
+        if not self.target_items:
+            self.target_box.insert("end", "No target items set.\n")
+            active_vals = ["No active targets"]
+        else:
+            for idx, item_id in enumerate(self.target_items, 1):
+                info = self.get_item_info_by_id(item_id)
+                if info:
+                    name = self.get_item_name(info, "Unknown")
+                    grade = info.get("grade", "COMMON")
+                    disp_str = f"{name} (ID: {item_id}) [{grade}]"
+                    self.target_box.insert("end", f" {idx}. {disp_str}\n")
+                    active_vals.append(disp_str)
+                else:
+                    disp_str = f"Item ID: {item_id}"
+                    self.target_box.insert("end", f" {idx}. {disp_str}\n")
+                    active_vals.append(disp_str)
+        self.target_box.configure(state="disabled")
+        
+        # Update the active targets removal dropdown
+        if hasattr(self, "combo_active_targets"):
+            self.combo_active_targets.configure(values=active_vals)
+            if active_vals:
+                self.combo_active_targets.set(active_vals[0])
+
+    def remove_target_item(self) -> None:
+        selected = self.combo_active_targets.get()
+        if "ID: " not in selected and "Item ID: " not in selected:
+            return
+        
+        item_id = None
+        match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
+        if match:
+            item_id = int(match.group("id"))
+        else:
+            match = re.search(r"Item ID:\s*(?P<id>\d+)", selected)
+            if match:
+                item_id = int(match.group("id"))
+                
+        if item_id is not None and item_id in self.target_items:
+            self.target_items.remove(item_id)
+            self.save_peeker_config()
+            self.update_target_box()
+            self.append_log(f"[FILTER] Removed Item ID {item_id} from targets.\n")
+ 
+    def get_item_info_by_id(self, item_id: int) -> dict[str, Any] | None:
+        for x in self.items_db:
+            if x.get("id") == item_id:
+                return x
+        return None
+ 
+    def get_item_name(self, info: dict[str, Any] | None, default: str = "Unknown") -> str:
+        if not info:
+            return default
+        name_dict = info.get("name")
+        if not isinstance(name_dict, dict):
+            return default
+        return name_dict.get("en-US", name_dict.get("en", default))
+ 
+    # =====================================================================
+    # Item Search & Filtering
+    # =====================================================================
+    def search_items(self) -> None:
+        query = self.entry_search.get().strip().lower()
+        if not query:
+            self.combo_results.configure(values=["Type a keyword first..."])
+            return
+ 
+        matches = []
+        for x in self.items_db:
+            name_en = self.get_item_name(x, "").lower()
+            name_dict = x.get("name")
+            name_id = ""
+            if isinstance(name_dict, dict):
+                name_id = name_dict.get("id", "").lower()
+            item_id = str(x.get("id", ""))
+            
+            if query in name_en or query in name_id or query == item_id:
+                name_en_disp = self.get_item_name(x, "Unknown")
+                grade = x.get("grade", "COMMON")
+                level = f" Lv.{x['level']}" if x.get("level") is not None else ""
+                matches.append(f"{name_en_disp}{level} [{grade}] (ID: {x['id']})")
+                if len(matches) >= 30: # Limit to 30 items
+                    break
+        
+        if matches:
+            self.combo_results.configure(values=matches)
+            self.combo_results.set(matches[0])
+        else:
+            self.combo_results.configure(values=["No matches found."])
+            self.combo_results.set("No matches found.")
+ 
+    def add_target_item(self) -> None:
+        selected = self.combo_results.get()
+        if "ID: " not in selected:
+            return
+        
+        match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
+        if match:
+            item_id = int(match.group("id"))
+            if item_id not in self.target_items:
+                self.target_items.append(item_id)
+                self.save_peeker_config()
+                self.update_target_box()
+                self.append_log(f"[FILTER] Added Item ID {item_id} to targets.\n")
+ 
+    def clear_target_items(self) -> None:
+        self.target_items = []
+        self.save_peeker_config()
+        self.update_target_box()
+        self.append_log("[FILTER] Cleared all target items.\n")
+ 
+    def save_grades_config(self) -> None:
+        self.target_grades = [g for g, var in self.grade_vars.items() if var.get()]
+        self.save_peeker_config()
+        self.append_log(f"[FILTER] Target Grades updated: {self.target_grades}\n")
+ 
+    # =====================================================================
+    # Calibration Functions (F8 listener)
+    # =====================================================================
+    def start_calibration(self, key: str) -> None:
+        self.calibrating_key = key
+        label_map = {
+            "menu": "Menu Button",
+            "exit": "Back to Title Button",
+            "stage_icon": "Tap to Start Button",
+            "confirm_enter": "Enter Stage Button"
+        }
+        self.lbl_cal_status.configure(
+            text=f"CALIBRATING: Hover over '{label_map[key]}' and press [F8] key!",
+            text_color="#e74c3c"
+        )
+        # Play tiny beep to confirm mode start
+        if winsound:
+            winsound.Beep(600, 150)
+ 
+    def check_hotkeys(self) -> None:
+        # Check F8 Calibration key (VK code: 0x77)
+        if self.calibrating_key:
+            # Check if F8 is pressed
+            if (ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000) != 0:
+                pt = POINT()
+                ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
+                
+                self.coords[self.calibrating_key] = [pt.x, pt.y]
+                self.calibrating_key = None
+                self.save_peeker_config()
+                
+                self.update_cal_labels()
+                self.lbl_cal_status.configure(text_color=COLOR_MUTED)
+                self.append_log(f"[CALIB] Calibrated {self.calibrating_key} to coordinates: {pt.x}, {pt.y}\n")
+                if winsound:
+                    winsound.Beep(1000, 250)
+                
+                # Debounce: wait until key released
+                while (ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000) != 0:
+                    time.sleep(0.05)
+ 
+        # Check F9 Emergency Stop key (VK code: 0x78)
+        if self.relogger_active:
+            if (ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8000) != 0:
+                self.stop_relogger("EMERGENCY STOP (F9 Pressed)")
+                while (ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8000) != 0:
+                    time.sleep(0.05)
+ 
+        self.after(50, self.check_hotkeys)
+ 
+    # =====================================================================
+    # Proxy Process Runner
+    # =====================================================================
+    def generate_certificate(self) -> bool:
+        cert_path = Path(os.path.expandvars(r"%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer"))
+        if cert_path.exists():
+            return True
+        
+        self.append_log("[INFO] Certificate not found. Generating certificate via mitmproxy...\n")
+        
+        # Start proxy briefly to generate cert
+        port = 8877
+        try:
+            pdata = json.loads((ROOT / "config.json").read_text(encoding="utf-8-sig"))
+            port = int(pdata.get("listen_port", 8877))
+        except Exception:
+            pass
+            
+        common_args = [
+            "-q",
+            "-s",
+            str(ADDON_PATH),
+            "--listen-port",
+            str(port),
+            "--flow-detail",
+            "0",
+            "--set",
+            "block_global=false",
+        ]
+        
+        mitmdump = shutil.which("mitmdump")
+        if mitmdump:
+            cmd = [mitmdump, *common_args]
+        else:
+            cmd = [
+                sys.executable,
+                "-u",
+                "-c",
+                "from mitmproxy.tools.main import mitmdump; mitmdump()",
+                *common_args
+            ]
+            
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                cwd=str(ROOT)
+            )
+            # Wait up to 5 seconds for cert generation
+            for _ in range(50):
+                if cert_path.exists():
+                    break
+                time.sleep(0.1)
+            proc.terminate()
+            proc.wait()
+            return cert_path.exists()
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to generate certificate: {e}\n")
+            return False
+ 
+    def install_cert_automatically(self) -> None:
+        cert_path = Path(os.path.expandvars(r"%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer"))
+        if not cert_path.exists():
+            if not self.generate_certificate():
+                self.append_log("[ERROR] Certificate file not found and could not generate. Please run proxy manually first.\n")
+                messagebox.showerror("Error", "Certificate file not found and could not be generated automatically.")
+                return
+        
+        self.append_log(f"[INFO] Installing certificate: {cert_path}...\n")
+        
+        def work():
+            cmd = ["certutil", "-addstore", "-user", "root", str(cert_path)]
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1
+                )
+                output = []
+                if proc.stdout:
+                    for line in proc.stdout:
+                        output.append(line)
+                proc.wait()
+                if proc.returncode == 0:
+                    self.append_log("[INFO] Certificate successfully trusted in root store.\n")
+                    self.after(0, lambda: messagebox.showinfo("Success", "Certificate successfully trusted!"))
+                else:
+                    self.append_log(f"[ERROR] certutil exited with error code: {proc.returncode}\n")
+                    self.append_log("".join(output) + "\n")
+                    self.after(0, lambda: messagebox.showerror("Error", f"certutil failed with code {proc.returncode}"))
+            except Exception as e:
+                self.append_log(f"[ERROR] Failed to run certutil: {e}\n")
+                self.after(0, lambda: messagebox.showerror("Error", f"Failed to run certutil: {e}"))
+ 
+        threading.Thread(target=work, daemon=True).start()
+ 
+    def toggle_proxy(self) -> None:
+        if self.proxy_running:
+            self.stop_proxy()
+        else:
+            self.start_proxy()
+ 
+    def start_proxy(self) -> None:
+        if self.proxy_running:
+            return
+        
+        # Verify peeker script exists
+        if not ADDON_PATH.exists():
+            self.append_log(f"[ERROR] chest_peeker.py not found at: {ADDON_PATH}\n")
+            return
+        
+        self.btn_proxy.configure(text="Stopping Proxy...", state="disabled")
+        
+        def work():
+            # Get configured port from config.json if available
+            port = 8877
+            config_path = ROOT / "config.json"
+            if config_path.exists():
+                try:
+                    pdata = json.loads(config_path.read_text(encoding="utf-8-sig"))
+                    port = int(pdata.get("listen_port", 8877))
+                except Exception:
+                    pass
+ 
+            # Automatically clean up any leftover processes listening on this port before starting
+            try:
+                if os.name == 'nt':
+                    netstat_cmd = f"netstat -ano | findstr LISTENING | findstr :{port}"
+                    p = subprocess.run(
+                        ["cmd", "/c", netstat_cmd],
+                        capture_output=True,
+                        text=True,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    if p.returncode == 0 and p.stdout:
+                        pids = set()
+                        for line in p.stdout.strip().split("\n"):
+                            parts = line.strip().split()
+                            if len(parts) >= 5:
+                                pid = parts[-1]
+                                if pid.isdigit() and int(pid) > 0 and int(pid) != os.getpid():
+                                    pids.add(int(pid))
+                        for pid in pids:
+                            self.append_log(f"[PROXY] Cleaning up leftover process on port {port} (PID: {pid})...\n")
+                            subprocess.run(
+                                ["taskkill", "/f", "/t", "/pid", str(pid)],
+                                stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE,
+                                creationflags=subprocess.CREATE_NO_WINDOW
+                            )
+                            time.sleep(0.5)
+            except Exception as pe:
+                self.log_gui_error(f"Failed to clear port {port}: {pe}")
+ 
+            # Run mitmdump directly to prevent grandchild process pipe issues
+            mitmdump_bin = shutil.which("mitmdump")
+            common_args = [
+                "-q",
+                "-s",
+                str(ADDON_PATH),
+                "--listen-port",
+                str(port),
+                "--flow-detail",
+                "0",
+                "--set",
+                "block_global=false",
+                "--ignore-hosts",
+                r".*\.steampowered\.com|.*\.steamcommunity\.com|.*\.steamgames\.com|.*\.steamcontent\.com|.*\.steamstatic\.com|.*\.steamusercontent\.com|.*\.steam-chat\.com|.*\.valvesoftware\.com|.*\.akamaihd\.net"
+            ]
+            if mitmdump_bin:
+                cmd = [mitmdump_bin, *common_args]
+            else:
+                cmd = [
+                    sys.executable,
+                    "-u",
+                    "-c",
+                    "from mitmproxy.tools.main import mitmdump; mitmdump()",
+                    *common_args
+                ]
+            
+            try:
+                env = os.environ.copy()
+                env["PYTHONUTF8"] = "1"
+                
+                self.proxy_process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
+                    cwd=str(ROOT),
+                    env=env
+                )
+                self.proxy_running = True
+                
+                # Update UI inside main thread
+                def ready_ui():
+                    self.btn_proxy.configure(text="Stop Peeker Proxy", fg_color=COLOR_PRIMARY, text_color="#ff0000", state="normal")
+                    self.lbl_proxy_status.configure(text=f"Status: Active (listening on port {port})", text_color="#0f8304")
+                    self.append_log(f"[PROXY] Proxy process started successfully.\n")
+ 
+                self.after(0, ready_ui)
+ 
+                # Read output stream line by line
+                if self.proxy_process.stdout:
+                    for line in self.proxy_process.stdout:
+                        self.parse_stdout_line(line)
+                
+            except Exception as e:
+                self.log_gui_error(f"Failed to launch proxy: {e}")
+            finally:
+                self.proxy_running = False
+                def stopped_ui():
+                    self.btn_proxy.configure(text="Start Peeker Proxy", fg_color=COLOR_PRIMARY, state="normal")
+                    self.lbl_proxy_status.configure(text="Status: Stopped", text_color=COLOR_MUTED)
+                    self.append_log("[PROXY] Proxy process finished.\n")
+                self.after(0, stopped_ui)
+ 
+        threading.Thread(target=work, daemon=True).start()
+ 
+    def stop_proxy(self) -> None:
+        if not self.proxy_running:
+            return
+        self.append_log("[PROXY] Shutting down proxy...\n")
+        
+        # Restore system proxy (chest_peeker restores it automatically on exit, but let's make sure)
+        import winreg
+        try:
+            reg_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
+                winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            
+            # Notify Windows settings changed
+            INTERNET_OPTION_SETTINGS_CHANGED = 39
+            INTERNET_OPTION_REFRESH = 37
+            try:
+                internet_set_option = ctypes.windll.wininet.InternetSetOptionW
+                internet_set_option(0, INTERNET_OPTION_SETTINGS_CHANGED, 0, 0)
+                internet_set_option(0, INTERNET_OPTION_REFRESH, 0, 0)
+            except Exception:
+                pass
+        except Exception:
+            pass
+ 
+        if self.proxy_process:
+            try:
+                # Forcefully terminate the process and all of its children (/t) on Windows
+                if os.name == 'nt':
+                    subprocess.run(
+                        ["taskkill", "/f", "/t", "/pid", str(self.proxy_process.pid)],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                else:
+                    self.proxy_process.terminate()
+                    self.proxy_process.wait(timeout=2)
+            except Exception:
+                pass
+            self.proxy_process = None
+ 
+    def log_gui_error(self, msg: str) -> None:
+        self.after(0, lambda: self.append_log(f"[ERROR] {msg}\n"))
+ 
+    # =====================================================================
+    # Log / Stdout Parser & Relogger Logic
+    # =====================================================================
+    def parse_stdout_line(self, line: str) -> None:
+        # Standard stdout forwarding
+        cleaned = line.strip()
+        
+        # Check for structured GUI tags
+        if cleaned.startswith("__PEEK_RESULT__:"):
+            parts = cleaned.split(":", 2)
+            if len(parts) >= 3:
+                res_type = parts[1]
+                data_json = parts[2]
+                
+                try:
+                    parsed_data = json.loads(data_json)
+                    self.after(0, lambda: self.process_peek_result(res_type, parsed_data))
+                except Exception as e:
+                    self.log_gui_error(f"Failed to parse result payload: {e}")
+            return
+        
+        # Debug traffic lines from proxy — show in log for traffic analysis
+        if cleaned.startswith("__PEEK_DEBUG__:"):
+            parts = cleaned.split(":", 2)
+            if len(parts) >= 3:
+                body_size = parts[1]
+                preview = parts[2][:120]
+                self.after(0, lambda: self.append_log(f"[TRAFFIC] Response ({body_size} bytes): {preview}...\n"))
+            return
+        
+        # Filter out ANSI sequences from terminal lines before appending to text area
+        ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        plain_line = ansi_escape.sub('', line)
+        
+        if plain_line.strip() and not plain_line.startswith("=") and not plain_line.startswith(" Chest:") and not plain_line.startswith("    └─ Drop:"):
+            self.after(0, lambda: self.append_log(plain_line))
+ 
+    def process_peek_result(self, res_type: str, data: Any) -> None:
+        """Triggers UI layout displaying the items and checks filters for relogger."""
+        try:
+            self._process_peek_result_impl(res_type, data)
+        except Exception as e:
+            import traceback
+            self.append_log(f"\n[CRITICAL ERROR] Error in process_peek_result: {e}\n{traceback.format_exc()}\n")
+
+    def _process_peek_result_impl(self, res_type: str, data: Any) -> None:
+        self.dashboard_scans_done += 1
+        self.dashboard_last_activity = f"Scan {self.dashboard_scans_done}"
+        self.update_dashboard_stats()
+        
+        # Handle 'seen' results silently — these are item IDs from any server response.
+        # If a target match is found while a countdown is running, auto-trigger safety relog.
+        if res_type == "seen":
+            if not self.relogger_active:
+                return
+            # Only act if a paused countdown is running (we found a target and are waiting)
+            if not (hasattr(self, 'paused_countdown_id') and self.paused_countdown_id):
+                return
+            # Don't re-trigger if already in safety countdown
+            if self.safety_countdown_active:
+                return
+            
+            seen_ids = data if isinstance(data, list) else []
+            for item_id in seen_ids:
+                # Check specific item targets
+                if item_id in self.target_items:
+                    info = self.get_item_info_by_id(item_id) or {}
+                    name = self.get_item_name(info, f"Item ({item_id})")
+                    self.append_log(f"\n[LIVE DETECT] 🎯 Target item '{name}' (ID: {item_id}) detected in server response!\n")
+                    self.append_log(f"[LIVE DETECT] Item has been collected! Switching to anti-rollback safety delay...\n")
+                    self.skip_to_safety_relog()
+                    return
+                
+                # Check grade targets
+                info = self.get_item_info_by_id(item_id)
+                if info:
+                    grade = info.get("grade", "COMMON").upper()
+                    if grade in self.target_grades:
+                        name = self.get_item_name(info, "").lower()
+                        if "soulstone" in name or "soul stone" in name:
+                            continue
+                        display_name = self.get_item_name(info, f"Item ({item_id})")
+                        self.append_log(f"\n[LIVE DETECT] 🎯 Target grade '{grade}' item '{display_name}' (ID: {item_id}) detected in server response!\n")
+                        self.append_log(f"[LIVE DETECT] Item has been collected! Switching to anti-rollback safety delay...\n")
+                        self.skip_to_safety_relog()
+                        return
+            return
+ 
+        # Handle server/auth errors with progressive backoff
+        if res_type == "error":
+            self.consecutive_errors += 1
+            error_code = str(data)
+            # Progressive backoff: 10s first, +5s each consecutive error, max 30s
+            backoff = min(10 + (self.consecutive_errors - 1) * 5, 30)
+            self.append_log(f"\n[ERROR] ⚠ Server error detected (HTTP {error_code})! Error #{self.consecutive_errors}\n")
+            self.append_log(f"[ERROR] Backing off {backoff}s to let server/Steam session recover...\n")
+ 
+            if self.relogger_active and self.relogger_method == "process_restart":
+                self.reentry_in_progress = False
+                def error_recovery():
+                    time.sleep(1)
+                    try:
+                        subprocess.run(
+                            ["taskkill", "/f", "/im", "TaskBarHero.exe"],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=subprocess.CREATE_NO_WINDOW
+                        )
+                        self._kill_trainer_elevated()
+                    except Exception:
+                        pass
+                    # Delay watchdog relaunch by manipulating last_launch_time
+                    self.last_launch_time = time.time() + backoff - 20.0
+                    self.after(0, lambda: self.append_log(f"[WATCHDOG] Game killed. Will relaunch in ~{backoff}s...\n"))
+                threading.Thread(target=error_recovery, daemon=True).start()
+            return
+ 
+        # Valid game data received — reset error counter
+        self.consecutive_errors = 0
+ 
+        self.append_log(f"\n======================================================\n")
+        self.append_log(f"   [PEEK FEED] DETECTED MAP DATA LOADED ({res_type.upper()})\n")
+        self.append_log(f"======================================================\n")
+ 
+        found_item_ids = []
+        found_item_indices = []
+        found_chest_ids = []
+        
+        if res_type == "chests":
+            # list of lists: [[chest_id, reward_id], ...]
+            for idx, (chest_id, reward_id) in enumerate(data, 1):
+                c_info = self.get_item_info_by_id(chest_id) or {}
+                r_info = self.get_item_info_by_id(reward_id) or {}
+                
+                c_name = self.get_item_name(c_info, f"Chest ({chest_id})")
+                r_name = self.get_item_name(r_info, f"Reward ({reward_id})")
+                r_grade = r_info.get("grade", "COMMON")
+                c_grade = c_info.get("grade", "COMMON")
+                if "boss" in c_name.lower():
+                    c_grade = "BOSS"
+                
+                self.append_colored_drop(idx, c_name, c_grade, is_chest=True)
+                self.append_colored_drop(idx, r_name, r_grade, is_chest=False)
+                
+                found_item_ids.append(reward_id)
+                found_item_indices.append(idx)
+                found_chest_ids.append(chest_id)
+                
+        elif res_type == "direct":
+            # list of item_ids
+            for idx, item_id in enumerate(data, 1):
+                info = self.get_item_info_by_id(item_id) or {}
+                name = self.get_item_name(info, f"Drop ({item_id})")
+                grade = info.get("grade", "COMMON")
+                self.append_colored_drop(idx, name, grade, is_chest=False)
+                
+                found_item_ids.append(item_id)
+                found_item_indices.append(1)
+                found_chest_ids.append(None)
+                
+        elif res_type == "synthesis":
+            # single item_id
+            item_id = int(data)
+            info = self.get_item_info_by_id(item_id) or {}
+            name = self.get_item_name(info, f"Drop ({item_id})")
+            grade = info.get("grade", "COMMON")
+            self.append_colored_drop(1, name, grade, is_chest=False)
+            
+            found_item_ids.append(item_id)
+            found_item_indices.append(1)
+            found_chest_ids.append(None)
+ 
+        self.append_log(f"======================================================\n\n")
+        self.dashboard_loots_observed += len(found_item_ids)
+        self.dashboard_last_activity = f"Observed {len(found_item_ids)} loot(s)"
+        self.update_dashboard_stats()
+ 
+        # Save last found items so we can re-evaluate them immediately if relogger starts
+        self.last_found_item_ids = found_item_ids
+        self.last_found_item_indices = found_item_indices
+        self.last_found_chest_ids = found_chest_ids
+        self.last_found_res_type = res_type
+        self.evaluate_filters_and_relog(found_item_ids, res_type, found_item_indices, found_chest_ids)
+
+    def evaluate_filters_and_relog(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
+        try:
+            self._evaluate_filters_and_relog_impl(found_item_ids, res_type, item_indices, chest_ids)
+        except Exception as e:
+            import traceback
+            self.append_log(f"\n[CRITICAL ERROR] Error in evaluate_filters_and_relog: {e}\n{traceback.format_exc()}\n")
+
+    def _evaluate_filters_and_relog_impl(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
+        # Check if any target item is present (independent of relogger_active)
+        target_found = False
+        found_target_id = None
+        
+        if item_indices is None:
+            item_indices = [1] * len(found_item_ids)
+
+        for item_id, index in zip(found_item_ids, item_indices):
+            # 1. Check if matches specific item targets (ALWAYS matches regardless of index)
+            if item_id in self.target_items:
+                target_found = True
+                found_target_id = item_id
+                break
+            
+            # 2. Check if matches grade targets (excluding Soulstones)
+            # Skip grade matching if chest index is greater than max_chest_index
+            if index > self.max_chest_index:
+                continue
+
+            info = self.get_item_info_by_id(item_id)
+            if info:
+                grade = info.get("grade", "COMMON").upper()
+                if grade in self.target_grades:
+                    # Check name for "soulstone"
+                    name = self.get_item_name(info, "").lower()
+                    if "soulstone" in name or "soul stone" in name:
+                        # Skip this item as it is a Soulstone
+                        continue
+                    
+                    target_found = True
+                    found_target_id = item_id
+                    break
+
+        # Always update the Upcoming Important Drops cards on every scan
+        self.update_upcoming_drops(found_item_ids, found_target_id if target_found else None, chest_ids)
+
+        if target_found:
+            info = self.get_item_info_by_id(found_target_id) or {}
+            name = self.get_item_name(info, "Unknown")
+            grade = info.get("grade", "COMMON")
+            self.dashboard_targets_found += 1
+            self.dashboard_last_activity = f"Target matched: {name}"
+            
+            # Update the alert banner
+            self.update_dashboard_alert(name, grade, item_id=found_target_id)
+            self.update_dashboard_stats()
+            
+            # Send Discord Notification if enabled
+            self.notify_discord_match(found_target_id, name, grade, res_type)
+            
+            # Play alert sound in a separate thread so it doesn't freeze the GUI
+            def play_alert():
+                if winsound:
+                    for _ in range(3):
+                        winsound.Beep(1200, 300)
+                        time.sleep(0.1)
+            threading.Thread(target=play_alert, daemon=True).start()
+
+            # Auto-launch trainer if enabled
+            if self.trainer_auto_launch and self.trainer_path:
+                trainer_exe = Path(self.trainer_path)
+                if trainer_exe.exists():
+                    try:
+                        # Start trainer with --auto argument (requires Administrator)
+                        ctypes.windll.shell32.ShellExecuteW(
+                            None, "runas", str(trainer_exe), "--auto", str(trainer_exe.parent), 1
+                        )
+                        self.append_log(f"[AUTO] Target item found! Launching trainer as Admin: {trainer_exe}\n")
+                    except Exception as e:
+                        self.append_log(f"[ERROR] Failed to launch trainer: {e}\n")
+                else:
+                    self.append_log(f"[ERROR] Trainer not found at path: {trainer_exe}\n")
+            
+            # Auto-Relogger specific actions
+            if self.relogger_active:
+                if res_type == "chests":
+                    self.append_log(f"[RELOGGER] TARGET ITEM FOUND in upcoming chests: {name} (ID: {found_target_id})!\n")
+                    self.append_log(f"[RELOGGER] Pausing automatic re-entry to let the game clear the stage and collect it. Will relaunch in {self.pause_duration} seconds.\n")
+                    # Start the paused countdown timer
+                    self.start_paused_countdown(self.pause_duration, name)
+                else:
+                    # target collected (res_type is direct or synthesis), restart to search next target!
+                    self.append_log(f"[RELOGGER] TARGET ITEM COLLECTED: {name} (ID: {found_target_id}) via {res_type.upper()}!\n")
+                    
+                    # Cancel any pending paused countdown from a previous chest detection
+                    if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+                        try:
+                            self.after_cancel(self.paused_countdown_id)
+                        except Exception:
+                            pass
+                        self.paused_countdown_id = None
+                    
+                    # Play quick alert sound
+                    def play_collect_alert():
+                        if winsound:
+                            for _ in range(2):
+                                winsound.Beep(1600, 200)
+                                time.sleep(0.05)
+                    threading.Thread(play_collect_alert, daemon=True).start()
+                    
+                    # Wait safety delay before relogging to prevent server rollback
+                    if self.relog_safety_delay > 0:
+                        self.append_log(f"[RELOGGER] Waiting {self.relog_safety_delay}s anti-rollback safety delay before re-entry...\n")
+                        self.start_paused_countdown(self.relog_safety_delay, f"{name} (collected, anti-rollback)")
+                    else:
+                        self.append_log("[RELOGGER] Initiating immediate re-entry (safety delay = 0)...\n")
+                        self.lbl_bot_status.configure(
+                            text="Relogger Status: ACTIVE (Logging stages...)\n[F9] to EMERGENCY STOP at any time",
+                            text_color="#00FF00"
+                        )
+                        if not self.reentry_in_progress:
+                            self.reentry_in_progress = True
+                            threading.Thread(target=self.run_reentry_clicks, daemon=True).start()
+        else:
+            # If no target found, reset/clear the alert banner so it reflects the current scan
+            self.set_dashboard_alert("Alert: No active alerts.", "info")
+            
+            # Relogger specific actions when no target is found
+            if self.relogger_active:
+                # If a paused countdown is already active (we found a target in chests
+                # and are waiting to collect), do NOT cancel it
+                if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+                    return
+                
+                self.lbl_bot_status.configure(
+                    text="Relogger Status: ACTIVE (Logging stages...)\n[F9] to EMERGENCY STOP at any time",
+                    text_color="#00FF00"
+                )
+                if self.reentry_in_progress:
+                    return
+                self.reentry_in_progress = True
+                self.append_log("[RELOGGER] Target item not found in drops. Initiating automatic re-entry...\n")
+                threading.Thread(target=self.run_reentry_clicks, daemon=True).start()
+ 
+    # =====================================================================
+    # Auto-Relogger Click Automation
+    # =====================================================================
+    def toggle_relogger(self) -> None:
+        if self.relogger_active:
+            self.stop_relogger("Stopped by User")
+        else:
+            self.start_relogger()
+ 
+    def start_relogger(self) -> None:
+        if self.relogger_method == "mouse_clicks":
+            # Check coordinates calibration
+            missing = [k for k, v in self.coords.items() if v is None]
+            if missing:
+                missing_labels = {
+                    "menu": "Menu Button",
+                    "exit": "Back to Title Button",
+                    "stage_icon": "Tap to Start Button",
+                    "confirm_enter": "Enter Stage Button"
+                }
+                labels_str = ", ".join(missing_labels[k] for k in missing)
+                self.append_log(f"[ERROR] Cannot start relogger. Please calibrate: {labels_str}\n")
+                return
+        else:
+            # Check game path exists
+            if not self.game_path or not os.path.exists(self.game_path):
+                self.append_log(f"[ERROR] Cannot start relogger. TaskbarHero.exe not found at path: {self.game_path}\n")
+                return
+ 
+        if not self.proxy_running:
+            self.append_log("[ERROR] Please start the Peeker Proxy before running the relogger.\n")
+            return
+ 
+        self.relogger_active = True
+        self.btn_bot.configure(text="Stop Auto-Relogger", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER)
+        self.lbl_bot_status.configure(
+            text="Relogger Status: ACTIVE (Logging stages...)\n[F9] to EMERGENCY STOP at any time",
+            text_color="#00FF00"
+        )
+        self.append_log(f"[RELOGGER] Auto-Relogger enabled ({'Process Restart' if self.relogger_method == 'process_restart' else 'Mouse Clicks'}). Checking upcoming drops...\n")
+ 
+        if self.relogger_method == "process_restart":
+            self.last_launch_time = 0
+            self.watchdog_token += 1
+            threading.Thread(target=self.relogger_watchdog_loop, args=(self.watchdog_token,), daemon=True).start()
+ 
+        # Evaluate last loaded drops immediately if they exist
+        if self.last_found_item_ids:
+            self.append_log("[RELOGGER] Evaluating currently loaded stage drops immediately...\n")
+            self.evaluate_filters_and_relog(
+                self.last_found_item_ids, 
+                self.last_found_res_type, 
+                self.last_found_item_indices,
+                getattr(self, 'last_found_chest_ids', None)
+            )
+ 
+    def stop_relogger(self, reason: str = "") -> None:
+        self.relogger_active = False
+        self.last_found_item_ids = []
+        self.last_found_item_indices = []
+        self.last_found_chest_ids = []
+        self.last_found_res_type = "chests"
+        self.reentry_in_progress = False
+        
+        # Cancel countdown if active
+        if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+            try:
+                self.after_cancel(self.paused_countdown_id)
+            except Exception:
+                pass
+            self.paused_countdown_id = None
+ 
+        # Hide the collected button
+        self.btn_item_collected.pack_forget()
+ 
+        self.btn_bot.configure(text="Start Auto-Relogger", fg_color="#2ecc71", hover_color="#27ae60")
+        self.lbl_bot_status.configure(
+            text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time",
+            text_color=COLOR_MUTED
+        )
+        reason_str = f" ({reason})" if reason else ""
+        self.append_log(f"[RELOGGER] Auto-Relogger disabled{reason_str}.\n")
+        if winsound:
+            winsound.Beep(400, 250)
+ 
+    def skip_to_safety_relog(self) -> None:
+        """User clicked 'Item Collected' — cancel long countdown, apply safety delay, then relog."""
+        self.append_log("[RELOGGER] User confirmed item collected!\n")
+        
+        # Cancel the long countdown
+        if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+            try:
+                self.after_cancel(self.paused_countdown_id)
+            except Exception:
+                pass
+            self.paused_countdown_id = None
+        
+        # Hide the collected button
+        self.btn_item_collected.pack_forget()
+        
+        # Apply safety delay before relogging
+        if self.relog_safety_delay > 0:
+            self.safety_countdown_active = True
+            self.append_log(f"[RELOGGER] Waiting {self.relog_safety_delay}s anti-rollback safety delay before re-entry...\n")
+            self.start_paused_countdown(self.relog_safety_delay, "Anti-rollback safety delay")
+        else:
+            self.append_log("[RELOGGER] Safety delay = 0, relogging immediately...\n")
+            self.force_relaunch_game()
+ 
+    def force_relaunch_game(self) -> None:
+        self.append_log("[RELOGGER] Force Relaunch requested by user...\n")
+        self.last_found_item_ids = []
+        self.last_found_item_indices = []
+        self.last_found_chest_ids = []
+        self.last_found_res_type = "chests"
+        self.reentry_in_progress = False
+        
+        # Cancel countdown if active
+        if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+            try:
+                self.after_cancel(self.paused_countdown_id)
+            except Exception:
+                pass
+            self.paused_countdown_id = None
+        
+        # Hide the collected button
+        self.btn_item_collected.pack_forget()
+        self.safety_countdown_active = False
+        
+        if self.relogger_active:
+            self.lbl_bot_status.configure(
+                text="Relogger Status: ACTIVE (Logging stages...)\n[F9] to EMERGENCY STOP at any time",
+                text_color="#00FF00"
+            )
+            
+        # Kill the game process and trainer
+        self.append_log("[RELOGGER] Terminating TaskbarHero.exe...\n")
+        try:
+            subprocess.run(
+                ["taskkill", "/f", "/im", "TaskBarHero.exe"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            self._kill_trainer_elevated()
+        except Exception as e:
+            self.append_log(f"[ERROR] Failed to kill process: {e}\n")
+            
+        self.last_launch_time = 0
+        
+        # If relogger is not active, launch the game manually
+        if not self.relogger_active:
+            try:
+                if "steam" in self.game_path.lower():
+                    self.append_log("[RELOGGER] Launching via Steam protocol natively...\n")
+                    os.startfile("steam://run/3678970")
+                else:
+                    self.append_log(f"[RELOGGER] Launching game from path: {self.game_path}...\n")
+                    os.startfile(self.game_path)
+            except Exception as e:
+                self.append_log(f"[ERROR] Failed to launch game: {e}\n")
+ 
+    def start_paused_countdown(self, seconds_left: int, item_name: str) -> None:
+        # Cancel any existing countdown first
+        if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+            try:
+                self.after_cancel(self.paused_countdown_id)
+            except Exception:
+                pass
+            self.paused_countdown_id = None
+ 
+        if not self.relogger_active:
+            return
+ 
+        if seconds_left <= 0:
+            self.append_log(f"[RELOGGER] Countdown finished. Auto-relaunching game now...\n")
+            self.btn_item_collected.pack_forget()
+            self.force_relaunch_game()
+            return
+ 
+        # Show the "Item Collected" button so user can skip the long countdown
+        # (only during the main wait, not during safety countdown)
+        if not self.safety_countdown_active:
+            try:
+                self.btn_item_collected.pack_forget()
+                self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8), before=self.lbl_bot_status)
+            except Exception:
+                pass
+ 
+        self.lbl_bot_status.configure(
+            text=f"Relogger Status: ACTIVE (PAUSED - Found {item_name})\nRelaunching game in {seconds_left}s...",
+            text_color="#f1c40f"
+        )
+        
+        # Schedule the next tick
+        self.paused_countdown_id = self.after(
+            1000, 
+            lambda: self.start_paused_countdown(seconds_left - 1, item_name)
+        )
+ 
+    def _kill_trainer_elevated(self) -> None:
+        """Kill TBH Trainer.exe even when it runs as Admin."""
+        try:
+            p = subprocess.run(
+                ["tasklist", "/fi", "imagename eq TBH Trainer.exe", "/fo", "csv", "/nh"],
+                capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            for line in p.stdout.strip().split('\n'):
+                if 'TBH Trainer' in line:
+                    pid = int(line.split(',')[1].strip('"'))
+                    PROCESS_TERMINATE = 0x0001
+                    handle = ctypes.windll.kernel32.OpenProcess(PROCESS_TERMINATE, False, pid)
+                    if handle:
+                        ctypes.windll.kernel32.TerminateProcess(handle, 1)
+                        ctypes.windll.kernel32.CloseHandle(handle)
+        except Exception:
+            pass
+ 
+    def run_reentry_clicks(self) -> None:
+        """Fires simulated mouse clicks or restarts process to exit and re-enter stage."""
+        try:
+            if self.relogger_method == "process_restart":
+                # Add a randomized delay before killing the game to simulate human reaction
+                import random
+                pre_kill_delay = random.uniform(2.0, 4.0)
+                time.sleep(pre_kill_delay)
+                if not self.relogger_active: return
+                
+                 # 1. Kill TaskbarHero.exe and TBH Trainer.exe
+                self.append_log("[RELOGGER] Terminating TaskbarHero.exe...\n")
+                try:
+                    subprocess.run(
+                        ["taskkill", "/f", "/im", "TaskBarHero.exe"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        creationflags=subprocess.CREATE_NO_WINDOW
+                    )
+                    self._kill_trainer_elevated()
+                except Exception as e:
+                    self.append_log(f"[WARNING] Failed to kill process: {e}\n")
+                
+                # Clear cached drops so they are not evaluated on next startup
+                self.last_found_item_ids = []
+                self.last_found_item_indices = []
+                self.last_found_chest_ids = []
+                self.last_found_res_type = "chests"
+ 
+                # Add a randomized cooldown delay before launching again to avoid bot pattern detection
+                post_kill_delay = random.uniform(4.0, 8.0)
+                self.append_log(f"[RELOGGER] Safety cooldown of {post_kill_delay:.1f}s before next launch...\n")
+                self.last_launch_time = time.time() - (20.0 - post_kill_delay)
+                
+            else:
+                # 1. Wait for game loading / stable screen
+                time.sleep(1.2)
+                if not self.relogger_active: return
+ 
+                # 2. Click Menu Button
+                self.append_log("[RELOGGER] Clicking Menu...\n")
+                self.click_coordinate("menu")
+                time.sleep(0.6)
+                if not self.relogger_active: return
+ 
+                # 3. Click Back to Title / Logout
+                self.append_log("[RELOGGER] Clicking Back to Title...\n")
+                self.click_coordinate("exit")
+                # Wait for game to return to title screen (takes longer)
+                time.sleep(3.0)
+                if not self.relogger_active: return
+ 
+                # 4. Click Tap to Start / Login
+                self.append_log("[RELOGGER] Clicking Tap to Start / Login...\n")
+                self.click_coordinate("stage_icon")
+                # Wait for game to load main screen / world map
+                time.sleep(4.0)
+                if not self.relogger_active: return
+ 
+                # 5. Click Enter Stage
+                self.append_log("[RELOGGER] Clicking Enter Stage...\n")
+                self.click_coordinate("confirm_enter")
+                self.append_log("[RELOGGER] Waiting for stage load...\n")
+        finally:
+            self.reentry_in_progress = False
+ 
+    def relogger_watchdog_loop(self, token: int) -> None:
+        """Watchdog loop to ensure the game is always running when the relogger is active."""
+        self.append_log("[RELOGGER] Watchdog loop started.\n")
+        while self.relogger_active and self.watchdog_token == token and self.relogger_method == "process_restart":
+            # Check if game is running
+            running = False
+            try:
+                p = subprocess.run(
+                    ["tasklist", "/fi", "imagename eq TaskBarHero.exe"],
+                    capture_output=True,
+                    text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                running = "taskbarhero.exe" in p.stdout.lower()
+            except Exception:
+                pass
+            
+            if not running:
+                current_time = time.time()
+                # Only launch if we haven't launched in the last 20 seconds to allow Steam to load
+                if current_time - self.last_launch_time > 20.0:
+                    self.append_log("[WATCHDOG] Game is not running. Launching TaskbarHero...\n")
+                    try:
+                        if "steam" in self.game_path.lower():
+                            self.append_log("[WATCHDOG] Steam path detected. Launching via Steam protocol natively (AppID 3678970)...\n")
+                            os.startfile("steam://run/3678970")
+                        else:
+                            os.startfile(self.game_path)
+                        self.last_launch_time = current_time
+                    except Exception as e:
+                        self.append_log(f"[WATCHDOG] Failed to launch game: {e}\n")
+            
+            time.sleep(3.0)
+ 
+    def click_coordinate(self, key: str) -> None:
+        pos = self.coords.get(key)
+        if not pos:
+            return
+        x, y = pos[0], pos[1]
+        
+        # Set cursor and left mouse click down/up
+        ctypes.windll.user32.SetCursorPos(x, y)
+        time.sleep(0.02)
+        ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0) # mouse left down
+        time.sleep(0.05)
+        ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0) # mouse left up
+ 
+    # Safe exit cleanup
+    def destroy(self) -> None:
+        self.stop_relogger()
+        self.stop_proxy()
+        super().destroy()
+ 
+    def on_closing(self) -> None:
+        self.stop_proxy()
+        self.destroy()
+ 
+# =====================================================================
+# Main execution entry
+# =====================================================================
+if __name__ == "__main__":
+    # Ensure Windows console supports colors just in case
+    if os.name == 'nt':
+        os.system('color')
+        
+    app = PeekerGUI()
+    try:
+        app.mainloop()
+    except KeyboardInterrupt:
+        app.destroy()

@@ -1,0 +1,36 @@
+{
+  "coords": {
+    "menu": null,
+    "exit": null,
+    "stage_icon": null,
+    "confirm_enter": null
+  },
+  "target_items": [
+    160005,
+    160006,
+    160007,
+    416171,
+    416172,
+    316171,
+    316172,
+    116004,
+    116003
+  ],
+  "target_grades": [
+    "BEYOND",
+    "ARCANA",
+    "CELESTIAL",
+    "DIVINE",
+    "COSMIC"
+  ],
+  "relogger_method": "process_restart",
+  "game_path": "C:\\Program Files (x86)\\Steam\\steamapps\\common\\TaskbarHero\\TaskBarHero.exe",
+  "pause_duration": 110,
+  "discord_notify_enabled": false,
+  "discord_webhook_url": "",
+  "discord_user_id": "",
+  "trainer_auto_launch": false,
+  "trainer_path": "",
+  "relog_safety_delay": 35,
+  "max_chest_index": 10
+}

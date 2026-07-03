@@ -1,0 +1,8 @@
+{
+  "listen_port": 8877,
+  "only_post": true,
+  "require_boxes_marker": true,
+  "url_contains": [
+    "/backend-function/base/v1"
+  ]
+}
