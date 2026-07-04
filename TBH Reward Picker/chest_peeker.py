@@ -288,12 +288,14 @@ class ChestPeekerHook:
                 pass
         
         if all_seen_ids:
-            chest_reward_ids = set(r for _, r in chests_found)
-            chest_box_ids = set(c for c, _ in chests_found)
-            direct_ids = set(direct_drops_found)
-            new_seen = all_seen_ids - chest_reward_ids - chest_box_ids - direct_ids
-            if new_seen:
-                print(f"__PEEK_RESULT__:seen:{json.dumps(sorted(new_seen))}", flush=True)
+            body_lower = body.lower()
+            if "added" in body_lower or "reward" in body_lower:
+                chest_reward_ids = set(r for _, r in chests_found)
+                chest_box_ids = set(c for c, _ in chests_found)
+                direct_ids = set(direct_drops_found)
+                new_seen = all_seen_ids - chest_reward_ids - chest_box_ids - direct_ids
+                if new_seen:
+                    print(f"__PEEK_RESULT__:seen:{json.dumps(sorted(new_seen))}", flush=True)
  
 def set_system_proxy(enabled: bool, port: int = 8877) -> None:
     if os.name != 'nt':
