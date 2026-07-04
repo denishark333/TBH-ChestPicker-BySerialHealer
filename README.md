@@ -54,7 +54,7 @@ Dica para Envio aos Amigos:
 
 Possíveis Erros de Codificação / UTF-8 (Console/Windows):
 
-Se algum de vocês se deparar com erros de codificação ou "UnicodeDecodeError/UnicodeEncodeError" ao rodar os scripts, isso ocorre porque o Windows deles não está com o suporte UTF-8 global ativo. Para resolver:
+Se se deparar com erros de codificação ou "UnicodeDecodeError/UnicodeEncodeError" ao rodar os scripts, isso ocorre porque o Windows deles não está com o suporte UTF-8 global ativo. Para resolver:
 1. Pressione as teclas "Win + R" no teclado para abrir o menu Executar.
 2. Digite "intl.cpl" e pressione Enter (isso abrirá as configurações de Região).
 3. Vá na aba "Administrativo".
