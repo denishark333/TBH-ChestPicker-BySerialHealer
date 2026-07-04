@@ -2115,6 +2115,8 @@ class PeekerGUI(ctk.CTk):
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     bufsize=1,
                     creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
                     cwd=str(ROOT),
