@@ -2667,8 +2667,14 @@ class PeekerGUI(ctk.CTk):
                 and self.awaiting_target_collection
                 and self.awaiting_target_item_id == found_target_id
             )
+            waiting_for_other_pending_target = (
+                res_type == "chests"
+                and self.awaiting_target_collection
+                and self.awaiting_target_item_id is not None
+                and self.awaiting_target_item_id != found_target_id
+            )
 
-            if not already_waiting_same_target and not resolving_pending_target:
+            if not already_waiting_same_target and not resolving_pending_target and not waiting_for_other_pending_target:
                 self.dashboard_targets_found += 1
                 self.dashboard_last_activity = f"Target matched: {name}"
                 
@@ -2708,7 +2714,20 @@ class PeekerGUI(ctk.CTk):
             # Auto-Relogger specific actions
             if self.relogger_active:
                 if res_type == "chests":
-                    if not already_waiting_same_target:
+                    if waiting_for_other_pending_target:
+                        pending_item_id = self.awaiting_target_item_id
+                        pending_info = self.get_item_info_by_id(pending_item_id) or {}
+                        pending_name = self.awaiting_target_name or self.get_item_name(pending_info, f"Item ({pending_item_id})")
+                        pending_grade = pending_info.get("grade", "COMMON")
+                        self.append_log(
+                            f"[RELOGGER] Additional target found in upcoming chests: {name} (ID: {found_target_id}), but pending target '{pending_name}' is still being tracked. Keeping current wait state.\n"
+                        )
+                        self.update_dashboard_alert(pending_name, pending_grade, item_id=pending_item_id)
+                        self.lbl_bot_status.configure(
+                            text=f"Relogger Status: ACTIVE (WAITING FOR COLLECTION - {pending_name})\nAdditional target seen: {name}. Game will relaunch after the pending target is collected",
+                            text_color="#f1c40f"
+                        )
+                    elif not already_waiting_same_target:
                         matching_chest_ids = []
                         if chest_ids:
                             matching_chest_ids = [
