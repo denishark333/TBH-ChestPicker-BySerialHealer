@@ -14,7 +14,19 @@
     316171,
     316172,
     116004,
-    116003
+    116003,
+    637171,
+    636172,
+    636171,
+    616171,
+    616172,
+    606171,
+    606172,
+    446171,
+    446172,
+    456171,
+    456172,
+    147001
   ],
   "target_grades": [
     "BEYOND",
@@ -31,6 +43,7 @@
   "discord_user_id": "",
   "trainer_auto_launch": false,
   "trainer_path": "",
+  "log_timestamps": true,
   "relog_safety_delay": 35,
   "max_chest_index": 10
 }

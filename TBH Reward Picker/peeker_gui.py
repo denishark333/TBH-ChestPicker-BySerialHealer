@@ -1,6 +1,7 @@
 from __future__ import annotations
  
 import json
+import locale
 import os
 import re
 import sys
@@ -60,7 +61,26 @@ ROOT = Path(__file__).resolve().parent
 PEEKER_CONFIG_PATH = ROOT / "peeker_config.json"
 ITEMS_PATH = ROOT / "items.json"
 ADDON_PATH = ROOT / "chest_peeker.py"
- 
+GRADE_MATCH_EXCLUDED_ITEM_IDS = {145001}
+
+
+def decode_windows_output(data: bytes) -> str:
+    if not data:
+        return ""
+
+    candidates = []
+    for encoding in ("utf-8", locale.getpreferredencoding(False), "oem", "mbcs", "cp1252"):
+        if encoding and encoding not in candidates:
+            candidates.append(encoding)
+
+    for encoding in candidates:
+        try:
+            return data.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return data.decode("utf-8", errors="replace")
+
 # Windows POINT structure for mouse positioning
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
@@ -104,6 +124,7 @@ class PeekerGUI(ctk.CTk):
         self.discord_user_id = ""
         self.trainer_auto_launch = False
         self.trainer_path = str(ROOT / "TBH Trainer.exe")
+        self.log_timestamps = True
         self.relog_safety_delay = 45  # seconds to wait after collecting item before relogging (anti-rollback)
         self.max_chest_index = 43  # default max chest index to match grade filters
         self.dashboard_scans_done = 0
@@ -121,6 +142,10 @@ class PeekerGUI(ctk.CTk):
         self.watchdog_token = 0
         self.reentry_in_progress = False
         self.safety_countdown_active = False
+        self.awaiting_target_collection = False
+        self.awaiting_target_item_id: int | None = None
+        self.awaiting_target_name = ""
+        self.awaiting_target_chest_ids: set[int] = set()
         self.consecutive_errors = 0
         self.last_launch_time = 0
         self.load_or_build_sprite_mapping()
@@ -162,6 +187,7 @@ class PeekerGUI(ctk.CTk):
                 self.discord_user_id = data.get("discord_user_id", "")
                 self.trainer_auto_launch = data.get("trainer_auto_launch", False)
                 self.trainer_path = data.get("trainer_path", str(ROOT / "TBH Trainer.exe"))
+                self.log_timestamps = data.get("log_timestamps", True)
                 self.relog_safety_delay = data.get("relog_safety_delay", 45)
                 self.max_chest_index = data.get("max_chest_index", 43)
             except Exception:
@@ -181,6 +207,7 @@ class PeekerGUI(ctk.CTk):
                 "discord_user_id": self.discord_user_id,
                 "trainer_auto_launch": self.trainer_auto_launch,
                 "trainer_path": self.trainer_path,
+                "log_timestamps": self.log_timestamps,
                 "relog_safety_delay": self.relog_safety_delay,
                 "max_chest_index": self.max_chest_index
             }
@@ -578,17 +605,77 @@ class PeekerGUI(ctk.CTk):
         self.entry_max_chest_index.insert(0, str(self.max_chest_index))
         self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
 
+        log_options_frame = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        log_options_frame.pack(fill="x", padx=15, pady=(8, 5))
+
+        self.log_timestamps_var = ctk.BooleanVar(value=self.log_timestamps)
+        cb_log_timestamps = ctk.CTkCheckBox(
+            log_options_frame,
+            text="Show timestamps in logs",
+            variable=self.log_timestamps_var,
+            command=self.on_log_timestamps_toggled,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT
+        )
+        cb_log_timestamps.pack(anchor="w")
+
         self.update_relogger_ui_visibility()
 
     def build_console_tab(self) -> None:
         self.console_frame = ctk.CTkFrame(self.tab_console, fg_color="transparent")
         self.console_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        self.console_frame.grid_columnconfigure(0, weight=1)
+        self.console_frame.grid_rowconfigure(0, weight=2)
+        self.console_frame.grid_rowconfigure(1, weight=3)
+
+        self.event_frame = ctk.CTkFrame(self.console_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.event_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+
+        event_label = ctk.CTkLabel(
+            self.event_frame,
+            text="Relogger Event Log",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        event_label.pack(anchor="w", padx=15, pady=(10, 5))
+
+        event_container = ctk.CTkFrame(self.event_frame, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1)
+        event_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
+
+        self.txt_event_log = tk.Text(
+            event_container,
+            bg=COLOR_BG,
+            fg=COLOR_TEXT,
+            insertbackground=COLOR_TEXT,
+            selectbackground=COLOR_PRIMARY,
+            selectforeground=COLOR_TEXT,
+            bd=0,
+            highlightthickness=0,
+            font=("Consolas", 9)
+        )
+        self.txt_event_log.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
+
+        event_scrollbar = ctk.CTkScrollbar(
+            event_container,
+            command=self.txt_event_log.yview,
+            button_color=COLOR_PRIMARY,
+            button_hover_color=COLOR_HOVER
+        )
+        event_scrollbar.pack(side="right", fill="y", padx=(5, 5), pady=10)
+        self.txt_event_log.configure(yscrollcommand=event_scrollbar.set)
 
         self.feed_frame = ctk.CTkFrame(self.console_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.feed_frame.pack(fill="both", expand=True)
+        self.feed_frame.grid(row=1, column=0, sticky="nsew")
 
-        lbl = ctk.CTkLabel(self.feed_frame, text="Live Peek Feed", font=ctk.CTkFont(size=16, weight="bold"), text_color=COLOR_TEXT)
-        lbl.pack(anchor="w", padx=15, pady=(10, 5))
+        feed_label = ctk.CTkLabel(
+            self.feed_frame,
+            text="Live Peek Feed",
+            font=ctk.CTkFont(size=16, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        feed_label.pack(anchor="w", padx=15, pady=(10, 5))
 
         log_container = ctk.CTkFrame(self.feed_frame, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1)
         log_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
@@ -1649,25 +1736,69 @@ class PeekerGUI(ctk.CTk):
     # =====================================================================
     # Log / Status / Label Updaters
     # =====================================================================
+    def _append_to_text_widget(self, widget: tk.Text | None, text: str) -> None:
+        if widget is None:
+            return
+        try:
+            widget.insert("end", text)
+            widget.see("end")
+        except Exception:
+            pass
+
+    def get_log_timestamp_prefix(self) -> str:
+        if not self.log_timestamps:
+            return ""
+        return f"[{time.strftime('%H:%M:%S')}] "
+
+    def format_log_text(self, text: str) -> str:
+        prefix = self.get_log_timestamp_prefix()
+        if not prefix or not text:
+            return text
+
+        trailing_newline = text.endswith("\n")
+        lines = text.splitlines()
+        formatted_lines = []
+        for line in lines:
+            formatted_lines.append((prefix + line) if line else line)
+
+        formatted = "\n".join(formatted_lines)
+        if trailing_newline:
+            formatted += "\n"
+        return formatted
+
+    def should_route_to_event_log(self, text: str) -> bool:
+        stripped = text.lstrip()
+        return stripped.startswith(("[RELOGGER]", "[WATCHDOG]", "[LIVE DETECT]", "[AUTO]"))
+
     def append_log(self, text: str) -> None:
         """Appends plain logs to the Live Feed terminal widget."""
-        self.txt_log.insert("end", text)
-        self.txt_log.see("end")
+        if self.should_route_to_event_log(text):
+            self.append_event_log(text)
+            return
+        self._append_to_text_widget(getattr(self, "txt_log", None), self.format_log_text(text))
+
+    def append_event_log(self, text: str) -> None:
+        """Appends relogger and collection events to the dedicated event log widget."""
+        target = getattr(self, "txt_event_log", None)
+        if target is None:
+            target = getattr(self, "txt_log", None)
+        self._append_to_text_widget(target, self.format_log_text(text))
  
     def append_colored_drop(self, idx: int, name: str, grade: str, is_chest: bool = False) -> None:
         """Appends item display lines formatted using color markers."""
         color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
         lbl_type = "Chest" if is_chest else "Drop"
         tag_name = f"grade_{grade.upper()}"
+        prefix = self.get_log_timestamp_prefix()
         
         # Configure tag color once (Tkinter handles duplicates safely)
         self.txt_log.tag_config(tag_name, foreground=color)
         
         if is_chest:
-            self.txt_log.insert("end", f"[{idx}] {lbl_type}: ")
+            self.txt_log.insert("end", f"{prefix}[{idx}] {lbl_type}: ")
             self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
         else:
-            self.txt_log.insert("end", "   └─ Drop: ")
+            self.txt_log.insert("end", f"{prefix}   └─ Drop: ")
             self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
             
         self.txt_log.see("end")
@@ -1751,7 +1882,12 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
- 
+
+    def on_log_timestamps_toggled(self) -> None:
+        self.log_timestamps = self.log_timestamps_var.get()
+        self.save_peeker_config()
+        self.append_log(f"[CONFIG] Log timestamps enabled: {self.log_timestamps}\n")
+
     def update_target_box(self) -> None:
         self.target_box.configure(state="normal")
         self.target_box.delete("1.0", "end")
@@ -1813,7 +1949,30 @@ class PeekerGUI(ctk.CTk):
         if not isinstance(name_dict, dict):
             return default
         return name_dict.get("en-US", name_dict.get("en", default))
- 
+
+    def should_ignore_grade_match(self, item_id: int, info: dict[str, Any] | None = None) -> bool:
+        if item_id in GRADE_MATCH_EXCLUDED_ITEM_IDS:
+            return True
+        info = info or self.get_item_info_by_id(item_id)
+        name = self.get_item_name(info, "").lower()
+        return "soulstone" in name or "soul stone" in name
+
+    def format_item_id_list_for_log(self, item_ids: list[int] | set[int], limit: int = 6) -> str:
+        values = sorted({int(item_id) for item_id in item_ids})
+        if not values:
+            return "none"
+
+        parts = []
+        for item_id in values[:limit]:
+            info = self.get_item_info_by_id(item_id)
+            name = self.get_item_name(info, f"Item ({item_id})")
+            parts.append(f"{name} ({item_id})")
+
+        if len(values) > limit:
+            parts.append(f"... +{len(values) - limit} more")
+
+        return ", ".join(parts)
+
     # =====================================================================
     # Item Search & Filtering
     # =====================================================================
@@ -2001,20 +2160,18 @@ class PeekerGUI(ctk.CTk):
                     cmd,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
+                    bufsize=0,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
                 )
-                output = []
-                if proc.stdout:
-                    for line in proc.stdout:
-                        output.append(line)
-                proc.wait()
+                stdout_data, _ = proc.communicate()
+                output = decode_windows_output(stdout_data).strip()
                 if proc.returncode == 0:
                     self.append_log("[INFO] Certificate successfully trusted in root store.\n")
                     self.after(0, lambda: messagebox.showinfo("Success", "Certificate successfully trusted!"))
                 else:
                     self.append_log(f"[ERROR] certutil exited with error code: {proc.returncode}\n")
-                    self.append_log("".join(output) + "\n")
+                    if output:
+                        self.append_log(output + "\n")
                     self.after(0, lambda: messagebox.showerror("Error", f"certutil failed with code {proc.returncode}"))
             except Exception as e:
                 self.append_log(f"[ERROR] Failed to run certutil: {e}\n")
@@ -2057,12 +2214,12 @@ class PeekerGUI(ctk.CTk):
                     p = subprocess.run(
                         ["cmd", "/c", netstat_cmd],
                         capture_output=True,
-                        text=True,
                         creationflags=subprocess.CREATE_NO_WINDOW
                     )
-                    if p.returncode == 0 and p.stdout:
+                    stdout_text = decode_windows_output(p.stdout)
+                    if p.returncode == 0 and stdout_text:
                         pids = set()
-                        for line in p.stdout.strip().split("\n"):
+                        for line in stdout_text.strip().splitlines():
                             parts = line.strip().split()
                             if len(parts) >= 5:
                                 pid = parts[-1]
@@ -2246,6 +2403,25 @@ class PeekerGUI(ctk.CTk):
         if res_type == "seen":
             if not self.relogger_active:
                 return
+            if self.awaiting_target_collection:
+                if self.safety_countdown_active:
+                    return
+                seen_ids = data if isinstance(data, list) else []
+                pending_item_id = self.awaiting_target_item_id
+                pending_chest_id = next((iid for iid in seen_ids if iid in self.awaiting_target_chest_ids), None)
+                if pending_chest_id is not None:
+                    chest_info = self.get_item_info_by_id(pending_chest_id) or {}
+                    chest_name = self.get_item_name(chest_info, f"Chest ({pending_chest_id})")
+                    pending_name = self.awaiting_target_name or "target item"
+                    self.append_log(f"\n[LIVE DETECT] Target chest '{chest_name}' (ID: {pending_chest_id}) detected in server response.\n")
+                    self.append_log(f"[LIVE DETECT] Chest containing '{pending_name}' has been collected. Switching to anti-rollback safety delay...\n")
+                    self.skip_to_safety_relog()
+                elif pending_item_id is not None and pending_item_id in seen_ids:
+                    pending_name = self.awaiting_target_name or f"Item ({pending_item_id})"
+                    self.append_log(f"\n[LIVE DETECT] Target item '{pending_name}' (ID: {pending_item_id}) detected in server response!\n")
+                    self.append_log("[LIVE DETECT] Pending target has been collected. Switching to anti-rollback safety delay...\n")
+                    self.skip_to_safety_relog()
+                return
             # Only act if a paused countdown is running (we found a target and are waiting)
             if not (hasattr(self, 'paused_countdown_id') and self.paused_countdown_id):
                 return
@@ -2269,8 +2445,7 @@ class PeekerGUI(ctk.CTk):
                 if info:
                     grade = info.get("grade", "COMMON").upper()
                     if grade in self.target_grades:
-                        name = self.get_item_name(info, "").lower()
-                        if "soulstone" in name or "soul stone" in name:
+                        if self.should_ignore_grade_match(item_id, info):
                             continue
                         display_name = self.get_item_name(info, f"Item ({item_id})")
                         self.append_log(f"\n[LIVE DETECT] 🎯 Target grade '{grade}' item '{display_name}' (ID: {item_id}) detected in server response!\n")
@@ -2278,7 +2453,52 @@ class PeekerGUI(ctk.CTk):
                         self.skip_to_safety_relog()
                         return
             return
- 
+
+        if res_type == "exchange":
+            if not self.relogger_active or not self.awaiting_target_collection or self.safety_countdown_active:
+                return
+            if not isinstance(data, dict):
+                return
+
+            added_ids = {
+                int(iid) for iid in data.get("added", [])
+                if isinstance(iid, int) or (isinstance(iid, str) and iid.isdigit())
+            }
+            removed_ids = {
+                int(iid) for iid in data.get("removed", [])
+                if isinstance(iid, int) or (isinstance(iid, str) and iid.isdigit())
+            }
+
+            pending_item_id = self.awaiting_target_item_id
+            pending_name = self.awaiting_target_name or "target item"
+            pending_removed_chest_id = next((iid for iid in removed_ids if iid in self.awaiting_target_chest_ids), None)
+            target_item_added = pending_item_id is not None and pending_item_id in added_ids
+            exchange_matches_target = pending_removed_chest_id is not None or target_item_added
+
+            if exchange_matches_target:
+                added_summary = self.format_item_id_list_for_log(added_ids)
+                removed_summary = self.format_item_id_list_for_log(removed_ids)
+                self.append_log(
+                    f"[LIVE DETECT] Exchange summary | added: {added_summary} | removed: {removed_summary}\n"
+                )
+
+            if pending_removed_chest_id is not None:
+                chest_info = self.get_item_info_by_id(pending_removed_chest_id) or {}
+                chest_name = self.get_item_name(chest_info, f"Chest ({pending_removed_chest_id})")
+                self.append_log(f"\n[LIVE DETECT] Target chest '{chest_name}' (ID: {pending_removed_chest_id}) was removed from inventory by an exchange.\n")
+                if pending_item_id is not None and pending_item_id in added_ids:
+                    self.append_log(f"[LIVE DETECT] Item '{pending_name}' was added to inventory from that chest. Switching to anti-rollback safety delay...\n")
+                else:
+                    self.append_log(f"[LIVE DETECT] Chest containing '{pending_name}' was consumed/opened. Switching to anti-rollback safety delay...\n")
+                self.skip_to_safety_relog()
+                return
+
+            if target_item_added:
+                self.append_log(f"\n[LIVE DETECT] Target item '{pending_name}' (ID: {pending_item_id}) was added to inventory by an exchange.\n")
+                self.append_log("[LIVE DETECT] Pending target has been collected. Switching to anti-rollback safety delay...\n")
+                self.skip_to_safety_relog()
+                return
+
         # Handle server/auth errors with progressive backoff
         if res_type == "error":
             self.consecutive_errors += 1
@@ -2385,6 +2605,7 @@ class PeekerGUI(ctk.CTk):
         # Check if any target item is present (independent of relogger_active)
         target_found = False
         found_target_id = None
+        pending_match_via_chest_id = None
         
         if item_indices is None:
             item_indices = [1] * len(found_item_ids)
@@ -2405,15 +2626,29 @@ class PeekerGUI(ctk.CTk):
             if info:
                 grade = info.get("grade", "COMMON").upper()
                 if grade in self.target_grades:
-                    # Check name for "soulstone"
-                    name = self.get_item_name(info, "").lower()
-                    if "soulstone" in name or "soul stone" in name:
-                        # Skip this item as it is a Soulstone
+                    if self.should_ignore_grade_match(item_id, info):
                         continue
                     
                     target_found = True
                     found_target_id = item_id
                     break
+
+        if (
+            self.awaiting_target_collection
+            and self.awaiting_target_item_id is not None
+            and res_type != "chests"
+            and self.awaiting_target_item_id in found_item_ids
+        ):
+            target_found = True
+            found_target_id = self.awaiting_target_item_id
+        elif self.awaiting_target_collection and res_type != "chests":
+            pending_match_via_chest_id = next(
+                (item_id for item_id in found_item_ids if item_id in self.awaiting_target_chest_ids),
+                None
+            )
+            if pending_match_via_chest_id is not None:
+                target_found = True
+                found_target_id = self.awaiting_target_item_id
 
         # Always update the Upcoming Important Drops cards on every scan
         self.update_upcoming_drops(found_item_ids, found_target_id if target_found else None, chest_ids)
@@ -2422,49 +2657,93 @@ class PeekerGUI(ctk.CTk):
             info = self.get_item_info_by_id(found_target_id) or {}
             name = self.get_item_name(info, "Unknown")
             grade = info.get("grade", "COMMON")
-            self.dashboard_targets_found += 1
-            self.dashboard_last_activity = f"Target matched: {name}"
-            
-            # Update the alert banner
-            self.update_dashboard_alert(name, grade, item_id=found_target_id)
-            self.update_dashboard_stats()
-            
-            # Send Discord Notification if enabled
-            self.notify_discord_match(found_target_id, name, grade, res_type)
-            
-            # Play alert sound in a separate thread so it doesn't freeze the GUI
-            def play_alert():
-                if winsound:
-                    for _ in range(3):
-                        winsound.Beep(1200, 300)
-                        time.sleep(0.1)
-            threading.Thread(target=play_alert, daemon=True).start()
+            already_waiting_same_target = (
+                res_type == "chests"
+                and self.awaiting_target_collection
+                and self.awaiting_target_item_id == found_target_id
+            )
+            resolving_pending_target = (
+                res_type != "chests"
+                and self.awaiting_target_collection
+                and self.awaiting_target_item_id == found_target_id
+            )
 
-            # Auto-launch trainer if enabled
-            if self.trainer_auto_launch and self.trainer_path:
-                trainer_exe = Path(self.trainer_path)
-                if trainer_exe.exists():
-                    try:
-                        # Start trainer with --auto argument (requires Administrator)
-                        ctypes.windll.shell32.ShellExecuteW(
-                            None, "runas", str(trainer_exe), "--auto", str(trainer_exe.parent), 1
-                        )
-                        self.append_log(f"[AUTO] Target item found! Launching trainer as Admin: {trainer_exe}\n")
-                    except Exception as e:
-                        self.append_log(f"[ERROR] Failed to launch trainer: {e}\n")
-                else:
-                    self.append_log(f"[ERROR] Trainer not found at path: {trainer_exe}\n")
+            if not already_waiting_same_target and not resolving_pending_target:
+                self.dashboard_targets_found += 1
+                self.dashboard_last_activity = f"Target matched: {name}"
+                
+                # Update the alert banner
+                self.update_dashboard_alert(name, grade, item_id=found_target_id)
+                self.update_dashboard_stats()
+                
+                # Send Discord Notification if enabled
+                self.notify_discord_match(found_target_id, name, grade, res_type)
+                
+                # Play alert sound in a separate thread so it doesn't freeze the GUI
+                def play_alert():
+                    if winsound:
+                        for _ in range(3):
+                            winsound.Beep(1200, 300)
+                            time.sleep(0.1)
+                threading.Thread(target=play_alert, daemon=True).start()
+
+                # Auto-launch trainer if enabled
+                if self.trainer_auto_launch and self.trainer_path:
+                    trainer_exe = Path(self.trainer_path)
+                    if trainer_exe.exists():
+                        try:
+                            # Start trainer with --auto argument (requires Administrator)
+                            ctypes.windll.shell32.ShellExecuteW(
+                                None, "runas", str(trainer_exe), "--auto", str(trainer_exe.parent), 1
+                            )
+                            self.append_log(f"[AUTO] Target item found! Launching trainer as Admin: {trainer_exe}\n")
+                        except Exception as e:
+                            self.append_log(f"[ERROR] Failed to launch trainer: {e}\n")
+                    else:
+                        self.append_log(f"[ERROR] Trainer not found at path: {trainer_exe}\n")
+            else:
+                self.update_dashboard_alert(name, grade, item_id=found_target_id)
+                self.update_dashboard_stats()
             
             # Auto-Relogger specific actions
             if self.relogger_active:
                 if res_type == "chests":
-                    self.append_log(f"[RELOGGER] TARGET ITEM FOUND in upcoming chests: {name} (ID: {found_target_id})!\n")
-                    self.append_log(f"[RELOGGER] Pausing automatic re-entry to let the game clear the stage and collect it. Will relaunch in {self.pause_duration} seconds.\n")
-                    # Start the paused countdown timer
-                    self.start_paused_countdown(self.pause_duration, name)
+                    if not already_waiting_same_target:
+                        matching_chest_ids = []
+                        if chest_ids:
+                            matching_chest_ids = [
+                                chest_id for item_id, chest_id in zip(found_item_ids, chest_ids)
+                                if item_id == found_target_id and chest_id is not None
+                            ]
+                        self.append_log(f"[RELOGGER] TARGET ITEM FOUND in upcoming chests: {name} (ID: {found_target_id})!\n")
+                        self.append_log("[RELOGGER] Automatic re-entry paused. The game will relaunch when the target item or its chest is actually obtained.\n")
+                        self.begin_collection_wait(found_target_id, name, matching_chest_ids)
+                    else:
+                        self.lbl_bot_status.configure(
+                            text=f"Relogger Status: ACTIVE (WAITING FOR COLLECTION - {name})\nGame will relaunch only after the item or its chest is collected",
+                            text_color="#f1c40f"
+                        )
                 else:
+                    if (
+                        self.awaiting_target_collection
+                        and self.awaiting_target_item_id is not None
+                        and found_target_id != self.awaiting_target_item_id
+                    ):
+                        pending_name = self.awaiting_target_name or f"Item ({self.awaiting_target_item_id})"
+                        self.append_log(
+                            f"[RELOGGER] Target match '{name}' detected via {res_type.upper()}, but still waiting for pending target '{pending_name}'. No relog yet.\n"
+                        )
+                        return
+
                     # target collected (res_type is direct or synthesis), restart to search next target!
-                    self.append_log(f"[RELOGGER] TARGET ITEM COLLECTED: {name} (ID: {found_target_id}) via {res_type.upper()}!\n")
+                    if pending_match_via_chest_id is not None:
+                        chest_info = self.get_item_info_by_id(pending_match_via_chest_id) or {}
+                        chest_name = self.get_item_name(chest_info, f"Chest ({pending_match_via_chest_id})")
+                        self.append_log(
+                            f"[RELOGGER] TARGET CHEST COLLECTED: {chest_name} (ID: {pending_match_via_chest_id}) containing {name}. Detected via {res_type.upper()}!\n"
+                        )
+                    else:
+                        self.append_log(f"[RELOGGER] TARGET ITEM COLLECTED: {name} (ID: {found_target_id}) via {res_type.upper()}!\n")
                     
                     # Cancel any pending paused countdown from a previous chest detection
                     if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
@@ -2473,6 +2752,7 @@ class PeekerGUI(ctk.CTk):
                         except Exception:
                             pass
                         self.paused_countdown_id = None
+                    self.set_collection_wait(False)
                     
                     # Play quick alert sound
                     def play_collect_alert():
@@ -2480,7 +2760,7 @@ class PeekerGUI(ctk.CTk):
                             for _ in range(2):
                                 winsound.Beep(1600, 200)
                                 time.sleep(0.05)
-                    threading.Thread(play_collect_alert, daemon=True).start()
+                    threading.Thread(target=play_collect_alert, daemon=True).start()
                     
                     # Wait safety delay before relogging to prevent server rollback
                     if self.relog_safety_delay > 0:
@@ -2496,11 +2776,24 @@ class PeekerGUI(ctk.CTk):
                             self.reentry_in_progress = True
                             threading.Thread(target=self.run_reentry_clicks, daemon=True).start()
         else:
+            # Relogger specific actions when no target is found
+            if self.relogger_active:
+                if self.awaiting_target_collection and not self.safety_countdown_active:
+                    pending_name = self.awaiting_target_name or "target item"
+                    self.set_dashboard_alert(f"Alert: Waiting for collection - {pending_name}", "warning")
+                    self.show_item_collected_button()
+                    self.lbl_bot_status.configure(
+                        text=f"Relogger Status: ACTIVE (WAITING FOR COLLECTION - {pending_name})\nGame will relaunch only after the item or its chest is collected",
+                        text_color="#f1c40f"
+                    )
+                    return
+
             # If no target found, reset/clear the alert banner so it reflects the current scan
             self.set_dashboard_alert("Alert: No active alerts.", "info")
             
             # Relogger specific actions when no target is found
             if self.relogger_active:
+
                 # If a paused countdown is already active (we found a target in chests
                 # and are waiting to collect), do NOT cancel it
                 if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
@@ -2579,6 +2872,8 @@ class PeekerGUI(ctk.CTk):
         self.last_found_chest_ids = []
         self.last_found_res_type = "chests"
         self.reentry_in_progress = False
+        self.set_collection_wait(False)
+        self.safety_countdown_active = False
         
         # Cancel countdown if active
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
@@ -2600,10 +2895,46 @@ class PeekerGUI(ctk.CTk):
         self.append_log(f"[RELOGGER] Auto-Relogger disabled{reason_str}.\n")
         if winsound:
             winsound.Beep(400, 250)
+
+    def set_collection_wait(
+        self,
+        active: bool,
+        item_id: int | None = None,
+        item_name: str = "",
+        chest_ids: list[int] | None = None
+    ) -> None:
+        self.awaiting_target_collection = active
+        self.awaiting_target_item_id = item_id if active else None
+        self.awaiting_target_name = item_name if active else ""
+        self.awaiting_target_chest_ids = set(chest_ids or []) if active else set()
+
+    def show_item_collected_button(self) -> None:
+        try:
+            self.btn_item_collected.pack_forget()
+            self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8), before=self.lbl_bot_status)
+        except Exception:
+            pass
+
+    def begin_collection_wait(self, item_id: int, item_name: str, chest_ids: list[int] | None = None) -> None:
+        if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
+            try:
+                self.after_cancel(self.paused_countdown_id)
+            except Exception:
+                pass
+            self.paused_countdown_id = None
+
+        self.safety_countdown_active = False
+        self.set_collection_wait(True, item_id, item_name, chest_ids)
+        self.show_item_collected_button()
+        self.lbl_bot_status.configure(
+            text=f"Relogger Status: ACTIVE (WAITING FOR COLLECTION - {item_name})\nGame will relaunch only after the item or its chest is collected",
+            text_color="#f1c40f"
+        )
  
     def skip_to_safety_relog(self) -> None:
         """User clicked 'Item Collected' — cancel long countdown, apply safety delay, then relog."""
         self.append_log("[RELOGGER] User confirmed item collected!\n")
+        self.set_collection_wait(False)
         
         # Cancel the long countdown
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
@@ -2632,6 +2963,7 @@ class PeekerGUI(ctk.CTk):
         self.last_found_chest_ids = []
         self.last_found_res_type = "chests"
         self.reentry_in_progress = False
+        self.set_collection_wait(False)
         
         # Cancel countdown if active
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
@@ -2699,8 +3031,7 @@ class PeekerGUI(ctk.CTk):
         # (only during the main wait, not during safety countdown)
         if not self.safety_countdown_active:
             try:
-                self.btn_item_collected.pack_forget()
-                self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8), before=self.lbl_bot_status)
+                self.show_item_collected_button()
             except Exception:
                 pass
  
@@ -2720,9 +3051,11 @@ class PeekerGUI(ctk.CTk):
         try:
             p = subprocess.run(
                 ["tasklist", "/fi", "imagename eq TBH Trainer.exe", "/fo", "csv", "/nh"],
-                capture_output=True, text=True, creationflags=subprocess.CREATE_NO_WINDOW
+                capture_output=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
             )
-            for line in p.stdout.strip().split('\n'):
+            stdout_text = decode_windows_output(p.stdout)
+            for line in stdout_text.strip().splitlines():
                 if 'TBH Trainer' in line:
                     pid = int(line.split(',')[1].strip('"'))
                     PROCESS_TERMINATE = 0x0001
@@ -2809,10 +3142,10 @@ class PeekerGUI(ctk.CTk):
                 p = subprocess.run(
                     ["tasklist", "/fi", "imagename eq TaskBarHero.exe"],
                     capture_output=True,
-                    text=True,
                     creationflags=subprocess.CREATE_NO_WINDOW
                 )
-                running = "taskbarhero.exe" in p.stdout.lower()
+                stdout_text = decode_windows_output(p.stdout)
+                running = "taskbarhero.exe" in stdout_text.lower()
             except Exception:
                 pass
             

@@ -107,6 +107,33 @@ def get_item_display(item_id: int, colored: bool = True) -> str:
     
     level_str = f" [Lv. {info['level']}]" if info.get("level") is not None else ""
     return f"{color}{name}{level_str} (ID: {item_id}) [{grade}]{C_RESET}"
+
+
+def collect_item_ids(node: Any) -> list[int]:
+    found: list[int] = []
+    if isinstance(node, dict):
+        item_id = node.get("itemId")
+        if isinstance(item_id, int):
+            found.append(item_id)
+        for value in node.values():
+            found.extend(collect_item_ids(value))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(collect_item_ids(value))
+    return found
+
+
+def collect_section_item_ids(node: Any, section_name: str) -> list[int]:
+    found: list[int] = []
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if key == section_name:
+                found.extend(collect_item_ids(value))
+            found.extend(collect_section_item_ids(value, section_name))
+    elif isinstance(node, list):
+        for value in node:
+            found.extend(collect_section_item_ids(value, section_name))
+    return found
  
 class ChestPeekerHook:
     def __init__(self) -> None:
@@ -209,6 +236,8 @@ class ChestPeekerHook:
  
         is_exchange = "removed" in body and "added" in body
         is_offering = False
+        exchange_added_ids: list[int] = []
+        exchange_removed_ids: list[int] = []
         if is_exchange:
             pretty_url = getattr(request, "pretty_url", "") or getattr(request, "url", "") or ""
             pretty_url_lower = pretty_url.lower()
@@ -221,6 +250,13 @@ class ChestPeekerHook:
                 "offering" in pretty_url_lower or "offer" in pretty_url_lower or
                 "offering" in request_body_lower or "offer" in request_body_lower
             )
+            try:
+                parsed_body = json.loads(body)
+            except Exception:
+                parsed_body = None
+            if parsed_body is not None:
+                exchange_added_ids = sorted(set(iid for iid in collect_section_item_ids(parsed_body, "added") if get_item_info(iid)))
+                exchange_removed_ids = sorted(set(iid for iid in collect_section_item_ids(parsed_body, "removed") if get_item_info(iid)))
  
         chests_found = []
         direct_drops_found = []
@@ -261,22 +297,28 @@ class ChestPeekerHook:
                 print(f" {C_BOLD}{idx}.{C_RESET} Drop: {item_str}")
             print("="*80 + "\n")
             print(f"__PEEK_RESULT__:direct:{json.dumps(direct_drops_found)}", flush=True)
+
+        if is_exchange and (exchange_added_ids or exchange_removed_ids):
+            print(f"__PEEK_RESULT__:exchange:{json.dumps({'added': exchange_added_ids, 'removed': exchange_removed_ids, 'offering': is_offering})}", flush=True)
         
         if is_exchange and is_offering:
-            added_idx = body.find('"added"')
-            if added_idx == -1:
-                added_idx = body.find('\\"added\\"')
-            if added_idx != -1:
-                match = ITEM_FIELD_RE.search(body, added_idx)
-                if match:
-                    reward_id = int(match.group("item_id"))
-                    print("\n" + "="*80)
-                    print(f"{C_BOLD}{C_CYAN}[PEEKER] DETECTED SYNTHESIS / CUBE OFFERING RESULT{C_RESET}")
-                    print("="*80)
-                    reward_str = get_item_display(reward_id)
-                    print(f" Result Drop: {reward_str}")
-                    print("="*80 + "\n")
-                    print(f"__PEEK_RESULT__:synthesis:{reward_id}", flush=True)
+            reward_id = exchange_added_ids[0] if exchange_added_ids else None
+            if reward_id is None:
+                added_idx = body.find('"added"')
+                if added_idx == -1:
+                    added_idx = body.find('\\"added\\"')
+                if added_idx != -1:
+                    match = ITEM_FIELD_RE.search(body, added_idx)
+                    if match:
+                        reward_id = int(match.group("item_id"))
+            if reward_id is not None:
+                print("\n" + "="*80)
+                print(f"{C_BOLD}{C_CYAN}[PEEKER] DETECTED SYNTHESIS / CUBE OFFERING RESULT{C_RESET}")
+                print("="*80)
+                reward_str = get_item_display(reward_id)
+                print(f" Result Drop: {reward_str}")
+                print("="*80 + "\n")
+                print(f"__PEEK_RESULT__:synthesis:{reward_id}", flush=True)
  
         all_seen_ids = set()
         for m in ITEM_FIELD_RE.finditer(body):
