@@ -53,7 +53,8 @@ GRADE_COLORS = {
     "CELESTIAL": "#00d2d3",     # Cyan
     "DIVINE": "#f1c40f",        # Gold
     "COSMIC": "#fd79a8",
-    "BOSS": "#00a8ff"           # Bright blue/cyan for Stage Boss Box
+    "BOSS": "#00a8ff",          # Bright blue/cyan for Stage Boss Box
+    "SOULSTONE": "#e74c3c"      # Red/crimson for Soulstone card
 }
  
 ROOT = Path(__file__).resolve().parent
@@ -90,6 +91,7 @@ class PeekerGUI(ctk.CTk):
             "confirm_enter": None
         }
         self.target_items: list[int] = []
+        self.ignored_items: list[int] = []
         self.target_grades: list[str] = ["BEYOND", "IMMORTAL", "ARCANA", "CELESTIAL", "DIVINE", "COSMIC"]
         self.relogger_method = "process_restart"
         self.game_path = r"C:\Program Files (x86)\Steam\steamapps\common\TaskbarHero\TaskBarHero.exe"
@@ -106,6 +108,8 @@ class PeekerGUI(ctk.CTk):
         self.trainer_path = str(ROOT / "TBH Trainer.exe")
         self.relog_safety_delay = 45  # seconds to wait after collecting item before relogging (anti-rollback)
         self.max_chest_index = 43  # default max chest index to match grade filters
+        self.rare_chest_cooldown = 420  # StageBoss chest cooldown (s)
+        self.uncommon_chest_cooldown = 240  # Normal chest cooldown (s)
         self.dashboard_scans_done = 0
         self.dashboard_loots_observed = 0
         self.dashboard_targets_found = 0
@@ -123,6 +127,9 @@ class PeekerGUI(ctk.CTk):
         self.safety_countdown_active = False
         self.consecutive_errors = 0
         self.last_launch_time = 0
+        self.current_stage_queue = []
+        self.current_chest_queue = []
+        self.target_chest_index = None
         self.load_or_build_sprite_mapping()
         
         # Build UI
@@ -153,6 +160,7 @@ class PeekerGUI(ctk.CTk):
                 data = json.loads(PEEKER_CONFIG_PATH.read_text(encoding="utf-8-sig"))
                 self.coords = data.get("coords", self.coords)
                 self.target_items = data.get("target_items", [])
+                self.ignored_items = data.get("ignored_items", [])
                 self.target_grades = data.get("target_grades", self.target_grades)
                 self.relogger_method = data.get("relogger_method", "process_restart")
                 self.game_path = data.get("game_path", r"C:\Program Files (x86)\Steam\steamapps\common\TaskbarHero\TaskBarHero.exe")
@@ -164,6 +172,8 @@ class PeekerGUI(ctk.CTk):
                 self.trainer_path = data.get("trainer_path", str(ROOT / "TBH Trainer.exe"))
                 self.relog_safety_delay = data.get("relog_safety_delay", 45)
                 self.max_chest_index = data.get("max_chest_index", 43)
+                self.rare_chest_cooldown = data.get("rare_chest_cooldown", 420)
+                self.uncommon_chest_cooldown = data.get("uncommon_chest_cooldown", 240)
             except Exception:
                 pass
  
@@ -172,6 +182,7 @@ class PeekerGUI(ctk.CTk):
             data = {
                 "coords": self.coords,
                 "target_items": self.target_items,
+                "ignored_items": self.ignored_items,
                 "target_grades": self.target_grades,
                 "relogger_method": self.relogger_method,
                 "game_path": self.game_path,
@@ -182,7 +193,9 @@ class PeekerGUI(ctk.CTk):
                 "trainer_auto_launch": self.trainer_auto_launch,
                 "trainer_path": self.trainer_path,
                 "relog_safety_delay": self.relog_safety_delay,
-                "max_chest_index": self.max_chest_index
+                "max_chest_index": self.max_chest_index,
+                "rare_chest_cooldown": self.rare_chest_cooldown,
+                "uncommon_chest_cooldown": self.uncommon_chest_cooldown
             }
             PEEKER_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception as e:
@@ -254,6 +267,22 @@ class PeekerGUI(ctk.CTk):
             frame.pack(fill="both", expand=True)
             frame.pack_forget()
 
+        # Proxy Controller inside Sidebar (at the bottom)
+        self.proxy_frame = ctk.CTkFrame(self.sidebar, fg_color=COLOR_SECONDARY, border_color=COLOR_BORDER, border_width=1)
+        self.proxy_frame.pack(side="bottom", fill="x", padx=12, pady=12)
+        
+        lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT)
+        lbl.pack(anchor="w", padx=10, pady=(6, 8))
+        
+        self.btn_proxy = ctk.CTkButton(self.proxy_frame, text="Start Peeker Proxy", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11, weight="bold"), command=self.toggle_proxy, height=32)
+        self.btn_proxy.pack(fill="x", padx=10, pady=(0, 6))
+        
+        self.btn_trust_cert = ctk.CTkButton(self.proxy_frame, text="Trust CA Certificate", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=10, weight="bold"), command=self.install_cert_automatically, height=24)
+        self.btn_trust_cert.pack(fill="x", padx=10, pady=(0, 6))
+        
+        self.lbl_proxy_status = ctk.CTkLabel(self.proxy_frame, text="Status: Stopped", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, slant="italic"))
+        self.lbl_proxy_status.pack(anchor="w", padx=10, pady=(0, 6))
+
         self.build_dashboard_tab()
         self.build_targets_tab()
         self.build_settings_tab()
@@ -277,8 +306,7 @@ class PeekerGUI(ctk.CTk):
         self.dashboard_content.grid_rowconfigure(0, weight=0)
         self.dashboard_content.grid_rowconfigure(1, weight=0)
         self.dashboard_content.grid_rowconfigure(2, weight=1)
-        self.dashboard_content.grid_rowconfigure(3, weight=1)
-        self.dashboard_content.grid_rowconfigure(4, weight=0)
+        self.dashboard_content.grid_rowconfigure(3, weight=0)
 
         # Create placeholder PIL image and CTkImage to prevent layout shift
         self.placeholder_pil = Image.new("RGBA", (32, 32), (26, 26, 30, 255))
@@ -317,7 +345,7 @@ class PeekerGUI(ctk.CTk):
 
         self.upcoming_card_vars = {}
         self.upcoming_card_widgets = {}
-        for idx, rarity in enumerate(["IMMORTAL", "LEGENDARY", "RARE", "BEYOND", "ARCANA"]):
+        for idx, rarity in enumerate(["IMMORTAL", "LEGENDARY", "RARE", "BEYOND", "ARCANA", "SOULSTONE"]):
             card = ctk.CTkFrame(self.upcoming_cards, fg_color="#161616", border_color=COLOR_BORDER, border_width=1)
             card.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=6, pady=6)
             color = GRADE_COLORS.get(rarity, COLOR_PRIMARY)
@@ -363,23 +391,52 @@ class PeekerGUI(ctk.CTk):
                 "lbl_name": lbl_name,
                 "lbl_item_icon": lbl_item_icon,
                 "chest_frame": chest_frame,
+                "lbl_from": lbl_from,
                 "lbl_chest_icon": lbl_chest_icon,
                 "lbl_chest_name": lbl_chest_name
             }
 
-        self.proxy_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.proxy_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(0, 8))
-        lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
-        lbl.pack(anchor="w", padx=15, pady=(8, 10))
-        self.btn_proxy = ctk.CTkButton(self.proxy_frame, text="Start Peeker Proxy", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.toggle_proxy, height=36)
-        self.btn_proxy.pack(fill="x", padx=15, pady=(0, 8))
-        self.btn_trust_cert = ctk.CTkButton(self.proxy_frame, text="Trust CA Certificate", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11, weight="bold"), command=self.install_cert_automatically, height=28)
-        self.btn_trust_cert.pack(fill="x", padx=15, pady=(0, 8))
-        self.lbl_proxy_status = ctk.CTkLabel(self.proxy_frame, text="Status: Stopped", text_color=COLOR_MUTED, font=ctk.CTkFont(size=12, slant="italic"))
-        self.lbl_proxy_status.pack(anchor="w", padx=15, pady=(0, 8))
+        self.bot_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.bot_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
+        lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl_bot.pack(anchor="w", padx=15, pady=(8, 10))
+        self.btn_bot = ctk.CTkButton(self.bot_frame, text="Start Auto-Relogger", fg_color="#2ecc71", hover_color="#27ae60", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.toggle_relogger, height=36)
+        self.btn_bot.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_force_relaunch = ctk.CTkButton(self.bot_frame, text="Force Relaunch Game", fg_color="#3498db", hover_color="#2980b9", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.force_relaunch_game, height=36)
+        self.btn_force_relaunch.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_item_collected = ctk.CTkButton(self.bot_frame, text="✅ Item Collected → Relog Now", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.skip_to_safety_relog, height=36)
+        self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
+        self.btn_item_collected.pack_forget()
+
+        # Manual cooldown settings in Auto-Relogger Controls
+        cooldowns_container = ctk.CTkFrame(self.bot_frame, fg_color="transparent")
+        cooldowns_container.pack(fill="x", padx=15, pady=(8, 4))
+        cooldowns_container.grid_columnconfigure(0, weight=1)
+        cooldowns_container.grid_columnconfigure(1, weight=1)
+        
+        # StageBoss (Rare) Cooldown
+        rare_col = ctk.CTkFrame(cooldowns_container, fg_color="transparent")
+        rare_col.grid(row=0, column=0, padx=(0, 4), sticky="ew")
+        ctk.CTkLabel(rare_col, text="StageBoss (Rare) Cooldown (s):", font=ctk.CTkFont(size=10, weight="bold"), text_color=COLOR_MUTED, anchor="w").pack(fill="x")
+        self.entry_rare_cooldown = ctk.CTkEntry(rare_col, fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=24)
+        self.entry_rare_cooldown.pack(fill="x", pady=(2, 0))
+        self.entry_rare_cooldown.insert(0, str(self.rare_chest_cooldown))
+        self.entry_rare_cooldown.bind("<KeyRelease>", self.on_rare_cooldown_typed)
+        
+        # Normal (Uncommon) Cooldown
+        uncommon_col = ctk.CTkFrame(cooldowns_container, fg_color="transparent")
+        uncommon_col.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+        ctk.CTkLabel(uncommon_col, text="Normal (Uncommon) Cooldown (s):", font=ctk.CTkFont(size=10, weight="bold"), text_color=COLOR_MUTED, anchor="w").pack(fill="x")
+        self.entry_uncommon_cooldown = ctk.CTkEntry(uncommon_col, fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=24)
+        self.entry_uncommon_cooldown.pack(fill="x", pady=(2, 0))
+        self.entry_uncommon_cooldown.insert(0, str(self.uncommon_chest_cooldown))
+        self.entry_uncommon_cooldown.bind("<KeyRelease>", self.on_uncommon_cooldown_typed)
+
+        self.lbl_bot_status = ctk.CTkLabel(self.bot_frame, text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, weight="bold"), justify="left")
+        self.lbl_bot_status.pack(anchor="w", padx=15, pady=(0, 8))
 
         self.telemetry_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.telemetry_frame.grid(row=2, column=1, sticky="nsew", padx=(8, 0), pady=(0, 8))
+        self.telemetry_frame.grid(row=2, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
         telemetry_title = ctk.CTkLabel(self.telemetry_frame, text="Session Telemetry", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         telemetry_title.pack(anchor="w", padx=15, pady=(10, 8))
 
@@ -418,27 +475,8 @@ class PeekerGUI(ctk.CTk):
         self.lbl_next_drop = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_var, font=ctk.CTkFont(size=11), text_color=COLOR_MUTED, wraplength=280, justify="left", anchor="w")
         self.lbl_next_drop.pack(side="left", fill="both", expand=True)
 
-        self.bot_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.bot_frame.grid(row=3, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
-        lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
-        lbl_bot.pack(anchor="w", padx=15, pady=(8, 10))
-        self.btn_bot = ctk.CTkButton(self.bot_frame, text="Start Auto-Relogger", fg_color="#2ecc71", hover_color="#27ae60", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.toggle_relogger, height=36)
-        self.btn_bot.pack(fill="x", padx=15, pady=(0, 8))
-        self.btn_force_relaunch = ctk.CTkButton(self.bot_frame, text="Force Relaunch Game", fg_color="#3498db", hover_color="#2980b9", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.force_relaunch_game, height=36)
-        self.btn_force_relaunch.pack(fill="x", padx=15, pady=(0, 8))
-        self.btn_item_collected = ctk.CTkButton(self.bot_frame, text="✅ Item Collected → Relog Now", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.skip_to_safety_relog, height=36)
-        self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
-        self.btn_item_collected.pack_forget()
-        self.lbl_bot_status = ctk.CTkLabel(self.bot_frame, text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, weight="bold"), justify="left")
-        self.lbl_bot_status.pack(anchor="w", padx=15, pady=(0, 8))
-
-        self.dashboard_summary_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.dashboard_summary_frame.grid(row=3, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
-        ctk.CTkLabel(self.dashboard_summary_frame, text="Quick Overview", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=15, pady=(10, 8))
-        ctk.CTkLabel(self.dashboard_summary_frame, text="• Proxy, scanner and alerting are now separated by tabs.\n• Target monitoring and webhook alerts are grouped together.\n• Console output remains available in its dedicated tab.", font=ctk.CTkFont(size=11), text_color=COLOR_MUTED, justify="left", wraplength=320).pack(anchor="w", padx=15, pady=(0, 10))
-
         footer = ctk.CTkLabel(self.dashboard_content, text="Powered by: SH", font=ctk.CTkFont(size=11), text_color=COLOR_MUTED)
-        footer.grid(row=4, column=0, columnspan=2, sticky="s", pady=(12, 0))
+        footer.grid(row=3, column=0, columnspan=2, sticky="s", pady=(12, 0))
 
     def build_targets_tab(self) -> None:
         self.targets_scroll = ctk.CTkScrollableFrame(
@@ -449,16 +487,34 @@ class PeekerGUI(ctk.CTk):
         )
         self.targets_scroll.pack(fill="both", expand=True, padx=12, pady=12)
 
-        self.filter_tabview = ctk.CTkTabview(
+        # Themed container frame for targets to match dashboard layout
+        self.targets_container = ctk.CTkFrame(
             self.targets_scroll,
             fg_color=COLOR_FRAME,
+            border_color=COLOR_BORDER,
+            border_width=1
+        )
+        self.targets_container.pack(fill="both", expand=True, padx=4, pady=4)
+
+        # Title for the container
+        lbl_title = ctk.CTkLabel(
+            self.targets_container, 
+            text="Targets & Alerts Configuration", 
+            font=ctk.CTkFont(size=14, weight="bold"), 
+            text_color=COLOR_TEXT
+        )
+        lbl_title.pack(anchor="w", padx=16, pady=(12, 4))
+
+        self.filter_tabview = ctk.CTkTabview(
+            self.targets_container,
+            fg_color="transparent",  # Make transparent so it uses container's COLOR_FRAME
             segmented_button_selected_color=COLOR_PRIMARY,
             segmented_button_selected_hover_color=COLOR_HOVER,
             segmented_button_unselected_color=COLOR_SECONDARY,
             segmented_button_unselected_hover_color=COLOR_SEC_HOVER,
             text_color=COLOR_TEXT
         )
-        self.filter_tabview.pack(fill="both", expand=True)
+        self.filter_tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         self.tab_items = self.filter_tabview.add("Item Targets")
         self.tab_grades = self.filter_tabview.add("Grade Targets")
@@ -478,7 +534,7 @@ class PeekerGUI(ctk.CTk):
         self.settings_scroll.pack(fill="both", expand=True, padx=12, pady=12)
 
         self.calib_frame = ctk.CTkFrame(self.settings_scroll, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.calib_frame.pack(fill="x", pady=(0, 15), ipady=5)
+        self.calib_frame.pack(fill="both", expand=True, padx=4, pady=4)
 
         lbl_cal = ctk.CTkLabel(self.calib_frame, text="Auto-Relogger Setup", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl_cal.pack(anchor="w", padx=15, pady=(8, 5))
@@ -774,14 +830,19 @@ class PeekerGUI(ctk.CTk):
         """Update the Upcoming Important Drops cards with items from the current roll.
         
         Extracts important items from the roll that match the tracked rarities (IMMORTAL, LEGENDARY, RARE, BEYOND, ARCANA).
+        Also displays the highest-grade Soulstone in the SOULSTONE card with its count.
         """
         if not hasattr(self, "upcoming_card_widgets"):
             return
         
         try:
             # Reset all cards to "No drop yet" to ensure dynamism
-            for widgets in self.upcoming_card_widgets.values():
+            for rarity, widgets in self.upcoming_card_widgets.items():
                 widgets["lbl_name"].configure(text="No drop yet")
+                
+                # Reset card border color
+                color = GRADE_COLORS.get(rarity, COLOR_BORDER)
+                widgets["card"].configure(border_color=color)
                 
                 # Clear image from CTk widget and set to placeholder
                 widgets["lbl_item_icon"].configure(image=self.placeholder_image, text="")
@@ -800,6 +861,13 @@ class PeekerGUI(ctk.CTk):
                 except Exception:
                     pass
                 widgets["lbl_chest_icon"]._my_image_ref = self.placeholder_chest_image
+                
+                # Restore elements in chest frame
+                if "lbl_from" in widgets:
+                    widgets["lbl_from"].pack(side="left")
+                if "lbl_chest_icon" in widgets:
+                    widgets["lbl_chest_icon"].pack(side="left", padx=(1, 4))
+                widgets["lbl_chest_name"].configure(text="", font=ctk.CTkFont(size=9, slant="italic"), text_color=COLOR_MUTED)
                 
                 widgets["chest_frame"].pack_forget()
 
@@ -823,19 +891,23 @@ class PeekerGUI(ctk.CTk):
             
             # Track which rarities have been filled (to avoid duplicates)
             filled_rarities = set()
+            grade_values = {
+                "COMMON": 0, "UNCOMMON": 1, "RARE": 2, "LEGENDARY": 3,
+                "BEYOND": 4, "IMMORTAL": 5, "ARCANA": 6, "CELESTIAL": 7,
+                "DIVINE": 8, "COSMIC": 9
+            }
             
-            # Iterate through all drops in the roll
+            # 1. Process standard cards (excluding Soulstones)
             for item_id, chest_id in zip(all_item_ids, chest_ids):
                 info = self.get_item_info_by_id(item_id) or {}
                 grade = info.get("grade", "COMMON").upper()
+                name = self.get_item_name(info, "")
                 
-                # Only process if this grade is one of our tracked rarities and not already filled
-                if grade in self.upcoming_card_widgets and grade not in filled_rarities:
-                    # Skip soulstones
-                    name = self.get_item_name(info, "").lower()
-                    if "soulstone" in name or "soul stone" in name:
-                        continue
-                    
+                # Check if it is a Soulstone
+                is_soulstone = "soulstone" in name.lower() or "soul stone" in name.lower()
+                
+                # Only process if this grade is one of our tracked rarities, not already filled, and not a soulstone
+                if grade in self.upcoming_card_widgets and grade not in filled_rarities and not is_soulstone:
                     # Update the card for this rarity
                     item_name = self.get_item_name(info, "Unknown")
                     widgets = self.upcoming_card_widgets[grade]
@@ -854,14 +926,52 @@ class PeekerGUI(ctk.CTk):
                     
                     filled_rarities.add(grade)
 
+            # 2. Process Soulstone card (SOULSTONE)
+            best_soulstone_id = None
+            best_soulstone_info = None
+            best_soulstone_val = -1
+            
+            for item_id in all_item_ids:
+                info = self.get_item_info_by_id(item_id) or {}
+                name = self.get_item_name(info, "")
+                if "soulstone" in name.lower() or "soul stone" in name.lower():
+                    grade = info.get("grade", "COMMON").upper()
+                    val = grade_values.get(grade, 0)
+                    if val > best_soulstone_val:
+                        best_soulstone_val = val
+                        best_soulstone_id = item_id
+                        best_soulstone_info = info
+            
+            if best_soulstone_id is not None and "SOULSTONE" in self.upcoming_card_widgets:
+                widgets = self.upcoming_card_widgets["SOULSTONE"]
+                grade = best_soulstone_info.get("grade", "COMMON").upper()
+                color = GRADE_COLORS.get(grade, "#e74c3c")
+                
+                # Update border color of the card to match soulstone rarity
+                widgets["card"].configure(border_color=color)
+                
+                # Update item name
+                widgets["lbl_name"].configure(text=self.get_item_name(best_soulstone_info, "Unknown"))
+                
+                # Load item sprite (main thread instantiation)
+                self.get_sprite_image(best_soulstone_id, callback=lambda pil, w=widgets["lbl_item_icon"]: self.set_widget_image(w, pil, (32, 32)))
+                
+                # Show count
+                count = all_item_ids.count(best_soulstone_id)
+                if "lbl_from" in widgets:
+                    widgets["lbl_from"].pack_forget()
+                if "lbl_chest_icon" in widgets:
+                    widgets["lbl_chest_icon"].pack_forget()
+                widgets["lbl_chest_name"].configure(
+                    text=f"Quantity: x{count}", 
+                    font=ctk.CTkFont(size=10, weight="bold"), 
+                    text_color=color
+                )
+                widgets["chest_frame"].pack(side="left", fill="x", anchor="w", pady=(2, 0))
+
             # Update Next Valuable Drop banner based on the highest grade found in the current scan
             highest_grade_item = None
             highest_grade_val = -1
-            grade_values = {
-                "COMMON": 0, "UNCOMMON": 1, "RARE": 2, "LEGENDARY": 3,
-                "BEYOND": 4, "IMMORTAL": 5, "ARCANA": 6, "CELESTIAL": 7,
-                "DIVINE": 8, "COSMIC": 9
-            }
             for item_id in all_item_ids:
                 info = self.get_item_info_by_id(item_id) or {}
                 name = self.get_item_name(info, "").lower()
@@ -903,7 +1013,20 @@ class PeekerGUI(ctk.CTk):
             frame.pack_forget()
         self.tab_frames[name].pack(fill="both", expand=True)
         for btn_name, btn in self.sidebar_buttons.items():
-            btn.configure(fg_color="transparent" if btn_name != name else COLOR_PRIMARY)
+            if btn_name == name:
+                btn.configure(
+                    fg_color=COLOR_PRIMARY,
+                    text_color="#0b0b0b",  # Dark text for high contrast on gold
+                    border_color=COLOR_PRIMARY,
+                    hover_color=COLOR_HOVER
+                )
+            else:
+                btn.configure(
+                    fg_color="transparent",
+                    text_color=COLOR_TEXT,
+                    border_color=COLOR_BORDER,
+                    hover_color=COLOR_SECONDARY
+                )
 
     def build_left_panel(self) -> None:
         self.left_content_frame.grid_columnconfigure(0, weight=1)
@@ -1210,23 +1333,23 @@ class PeekerGUI(ctk.CTk):
         )
         self.tab_items.configure(height=360)
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
- 
+
         # Search box
         search_box = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         search_box.pack(fill="x", padx=5, pady=(5, 5))
- 
+
         self.entry_search = ctk.CTkEntry(
             search_box, placeholder_text="Item Name (e.g. Dimensional)",
             fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT
         )
         self.entry_search.pack(side="left", fill="x", expand=True, padx=(0, 5))
- 
+
         self.btn_search = ctk.CTkButton(
             search_box, text="Search", width=65, fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.search_items
         )
         self.btn_search.pack(side="right")
- 
+
         # Search Results Selection Area
         self.combo_results = ctk.CTkComboBox(
             scroll_frame, values=["Search and select an item..."],
@@ -1234,61 +1357,129 @@ class PeekerGUI(ctk.CTk):
             dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
         )
         self.combo_results.pack(fill="x", padx=5, pady=5)
- 
+
+        # Actions Frame (Add to Targets / Add to Ignore List side-by-side)
+        actions_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        actions_frame.pack(fill="x", padx=5, pady=(5, 10))
+        actions_frame.grid_columnconfigure(0, weight=1)
+        actions_frame.grid_columnconfigure(1, weight=1)
+
         self.btn_add_filter = ctk.CTkButton(
-            scroll_frame, text="Add Selection to Targets",
+            actions_frame, text="Add to Targets 🎯",
             fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.add_target_item
         )
-        self.btn_add_filter.pack(fill="x", padx=5, pady=(5, 10))
- 
-        # Target Items List Frame
-        self.target_list_lbl = ctk.CTkLabel(scroll_frame, text="Active Target List:", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
-        self.target_list_lbl.pack(anchor="w", padx=5, pady=(5, 2))
+        self.btn_add_filter.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
-        self.target_box_container = ctk.CTkFrame(
-            scroll_frame,
-            fg_color="transparent",
-            height=210
+        self.btn_add_ignore = ctk.CTkButton(
+            actions_frame, text="Add to Ignore List ⛔",
+            fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
+            command=self.add_ignored_item
         )
-        self.target_box_container.pack(fill="x", padx=5, pady=(0, 5))
+        self.btn_add_ignore.grid(row=0, column=1, padx=(4, 0), sticky="ew")
+
+        # Split Container for Targets vs Ignores side-by-side
+        split_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        split_frame.pack(fill="both", expand=True, padx=5, pady=5)
+        split_frame.grid_columnconfigure(0, weight=1)
+        split_frame.grid_columnconfigure(1, weight=1)
+
+        # ----------------------------------------------------
+        # COLUMN 0: TARGETS PANEL
+        # ----------------------------------------------------
+        targets_panel = ctk.CTkFrame(split_frame, fg_color="#141414", border_color=COLOR_BORDER, border_width=1)
+        targets_panel.grid(row=0, column=0, padx=(0, 6), pady=5, sticky="nsew")
+
+        lbl_t_title = ctk.CTkLabel(targets_panel, text="Active Target List 🎯", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
+        lbl_t_title.pack(anchor="w", padx=12, pady=(10, 5))
+
+        self.target_box_container = ctk.CTkFrame(targets_panel, fg_color="transparent", height=130)
+        self.target_box_container.pack(fill="x", padx=12, pady=(0, 5))
         self.target_box_container.pack_propagate(False)
- 
+
         self.target_box = ctk.CTkTextbox(
             self.target_box_container, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1,
             text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=18
         )
         self.target_box.pack(fill="both", expand=True)
- 
-        # Remove Target Area
-        remove_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        remove_frame.pack(fill="x", padx=5, pady=(5, 5))
-        
+
+        remove_t_frame = ctk.CTkFrame(targets_panel, fg_color="transparent")
+        remove_t_frame.pack(fill="x", padx=12, pady=(5, 5))
+
         self.combo_active_targets = ctk.CTkComboBox(
-            remove_frame, values=["Select a target to remove..."],
+            remove_t_frame, values=["Select a target to remove..."],
             fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT,
             dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
         )
         self.combo_active_targets.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        
+
         self.btn_remove_target = ctk.CTkButton(
-            remove_frame, text="Remove Target",
+            remove_t_frame, text="Remove",
             fg_color="#e67e22", hover_color="#d35400",
             text_color=COLOR_TEXT,
             command=self.remove_target_item,
-            width=120
+            width=80
         )
         self.btn_remove_target.pack(side="right")
 
         self.btn_clear_filters = ctk.CTkButton(
-            scroll_frame, text="Clear Target List",
+            targets_panel, text="Clear Target List",
             fg_color="#e74c3c", hover_color="#c0392b",
             text_color=COLOR_TEXT,
-            font=ctk.CTkFont(size=12, weight="bold"),
+            font=ctk.CTkFont(size=11, weight="bold"),
             command=self.clear_target_items,
-            height=32
+            height=28
         )
-        self.btn_clear_filters.pack(fill="x", padx=5, pady=(5, 10))
+        self.btn_clear_filters.pack(fill="x", padx=12, pady=(5, 10))
+
+        # ----------------------------------------------------
+        # COLUMN 1: IGNORES PANEL
+        # ----------------------------------------------------
+        ignores_panel = ctk.CTkFrame(split_frame, fg_color="#141414", border_color=COLOR_BORDER, border_width=1)
+        ignores_panel.grid(row=0, column=1, padx=(6, 0), pady=5, sticky="nsew")
+
+        lbl_i_title = ctk.CTkLabel(ignores_panel, text="Active Ignore List ⛔", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
+        lbl_i_title.pack(anchor="w", padx=12, pady=(10, 5))
+
+        self.ignore_box_container = ctk.CTkFrame(ignores_panel, fg_color="transparent", height=130)
+        self.ignore_box_container.pack(fill="x", padx=12, pady=(0, 5))
+        self.ignore_box_container.pack_propagate(False)
+
+        self.ignore_box = ctk.CTkTextbox(
+            self.ignore_box_container, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1,
+            text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=18
+        )
+        self.ignore_box.pack(fill="both", expand=True)
+
+        remove_i_frame = ctk.CTkFrame(ignores_panel, fg_color="transparent")
+        remove_i_frame.pack(fill="x", padx=12, pady=(5, 5))
+
+        self.combo_active_ignores = ctk.CTkComboBox(
+            remove_i_frame, values=["Select an item to un-ignore..."],
+            fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT,
+            dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
+        )
+        self.combo_active_ignores.pack(side="left", fill="x", expand=True, padx=(0, 5))
+
+        self.btn_remove_ignore = ctk.CTkButton(
+            remove_i_frame, text="Un-ignore",
+            fg_color="#e67e22", hover_color="#d35400",
+            text_color=COLOR_TEXT,
+            command=self.remove_ignored_item,
+            width=80
+        )
+        self.btn_remove_ignore.pack(side="right")
+
+        self.btn_clear_ignores = ctk.CTkButton(
+            ignores_panel, text="Clear Ignore List",
+            fg_color="#e74c3c", hover_color="#c0392b",
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            command=self.clear_ignored_items,
+            height=28
+        )
+        self.btn_clear_ignores.pack(fill="x", padx=12, pady=(5, 10))
+
         self.update_target_box()
  
     def build_grade_filters_tab(self) -> None:
@@ -1751,8 +1942,27 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
+
+    def on_rare_cooldown_typed(self, event: Any) -> None:
+        try:
+            val = int(self.entry_rare_cooldown.get().strip())
+            if val >= 0:
+                self.rare_chest_cooldown = val
+                self.save_peeker_config()
+        except Exception:
+            pass
+
+    def on_uncommon_cooldown_typed(self, event: Any) -> None:
+        try:
+            val = int(self.entry_uncommon_cooldown.get().strip())
+            if val >= 0:
+                self.uncommon_chest_cooldown = val
+                self.save_peeker_config()
+        except Exception:
+            pass
  
     def update_target_box(self) -> None:
+        # 1. Update Target Box
         self.target_box.configure(state="normal")
         self.target_box.delete("1.0", "end")
         active_vals = []
@@ -1780,6 +1990,35 @@ class PeekerGUI(ctk.CTk):
             if active_vals:
                 self.combo_active_targets.set(active_vals[0])
 
+        # 2. Update Ignore Box
+        if hasattr(self, "ignore_box"):
+            self.ignore_box.configure(state="normal")
+            self.ignore_box.delete("1.0", "end")
+            active_ignores = []
+            if not getattr(self, "ignored_items", []):
+                self.ignore_box.insert("end", "No ignored items set.\n")
+                active_ignores = ["No active ignores"]
+            else:
+                for idx, item_id in enumerate(self.ignored_items, 1):
+                    info = self.get_item_info_by_id(item_id)
+                    if info:
+                        name = self.get_item_name(info, "Unknown")
+                        grade = info.get("grade", "COMMON")
+                        disp_str = f"{name} (ID: {item_id}) [{grade}]"
+                        self.ignore_box.insert("end", f" {idx}. {disp_str}\n")
+                        active_ignores.append(disp_str)
+                    else:
+                        disp_str = f"Item ID: {item_id}"
+                        self.ignore_box.insert("end", f" {idx}. {disp_str}\n")
+                        active_ignores.append(disp_str)
+            self.ignore_box.configure(state="disabled")
+            
+            # Update the active ignores removal dropdown
+            if hasattr(self, "combo_active_ignores"):
+                self.combo_active_ignores.configure(values=active_ignores)
+                if active_ignores:
+                    self.combo_active_ignores.set(active_ignores[0])
+
     def remove_target_item(self) -> None:
         selected = self.combo_active_targets.get()
         if "ID: " not in selected and "Item ID: " not in selected:
@@ -1799,6 +2038,26 @@ class PeekerGUI(ctk.CTk):
             self.save_peeker_config()
             self.update_target_box()
             self.append_log(f"[FILTER] Removed Item ID {item_id} from targets.\n")
+
+    def remove_ignored_item(self) -> None:
+        selected = self.combo_active_ignores.get()
+        if "ID: " not in selected and "Item ID: " not in selected:
+            return
+        
+        item_id = None
+        match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
+        if match:
+            item_id = int(match.group("id"))
+        else:
+            match = re.search(r"Item ID:\s*(?P<id>\d+)", selected)
+            if match:
+                item_id = int(match.group("id"))
+                
+        if item_id is not None and item_id in self.ignored_items:
+            self.ignored_items.remove(item_id)
+            self.save_peeker_config()
+            self.update_target_box()
+            self.append_log(f"[FILTER] Removed Item ID {item_id} from ignores.\n")
  
     def get_item_info_by_id(self, item_id: int) -> dict[str, Any] | None:
         for x in self.items_db:
@@ -1813,6 +2072,19 @@ class PeekerGUI(ctk.CTk):
         if not isinstance(name_dict, dict):
             return default
         return name_dict.get("en-US", name_dict.get("en", default))
+
+    def estimate_chest_cooldown(self, chest_id: int | None) -> int:
+        if chest_id is None:
+            return self.uncommon_chest_cooldown
+        c_info = self.get_item_info_by_id(chest_id)
+        if not c_info:
+            return self.uncommon_chest_cooldown
+        name = self.get_item_name(c_info, "").lower()
+        grade = c_info.get("grade", "COMMON").upper()
+        
+        if "boss" in name or "rare" in name or grade in ["RARE", "BOSS"]:
+            return self.rare_chest_cooldown
+        return self.uncommon_chest_cooldown
  
     # =====================================================================
     # Item Search & Filtering
@@ -1860,12 +2132,32 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
                 self.update_target_box()
                 self.append_log(f"[FILTER] Added Item ID {item_id} to targets.\n")
+
+    def add_ignored_item(self) -> None:
+        selected = self.combo_results.get()
+        if "ID: " not in selected:
+            return
+        
+        match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
+        if match:
+            item_id = int(match.group("id"))
+            if item_id not in self.ignored_items:
+                self.ignored_items.append(item_id)
+                self.save_peeker_config()
+                self.update_target_box()
+                self.append_log(f"[FILTER] Added Item ID {item_id} to ignores.\n")
  
     def clear_target_items(self) -> None:
         self.target_items = []
         self.save_peeker_config()
         self.update_target_box()
         self.append_log("[FILTER] Cleared all target items.\n")
+
+    def clear_ignored_items(self) -> None:
+        self.ignored_items = []
+        self.save_peeker_config()
+        self.update_target_box()
+        self.append_log("[FILTER] Cleared all ignored items.\n")
  
     def save_grades_config(self) -> None:
         self.target_grades = [g for g, var in self.grade_vars.items() if var.get()]
@@ -2244,6 +2536,38 @@ class PeekerGUI(ctk.CTk):
         # Handle 'seen' results silently — these are item IDs from any server response.
         # If a target match is found while a countdown is running, auto-trigger safety relog.
         if res_type == "seen":
+            seen_ids = data if isinstance(data, list) else []
+            
+            # Desempilhar itens da fila sequencialmente para manter o controle de progresso
+            for item_id in seen_ids:
+                if hasattr(self, 'current_stage_queue') and self.current_stage_queue and item_id in self.current_stage_queue:
+                    try:
+                        idx = self.current_stage_queue.index(item_id)
+                        # Desempilhar até o item atual (inclusive)
+                        for _ in range(idx + 1):
+                            popped_id = self.current_stage_queue.pop(0)
+                            if hasattr(self, 'current_chest_queue') and self.current_chest_queue:
+                                self.current_chest_queue.pop(0)
+                            
+                            popped_info = self.get_item_info_by_id(popped_id)
+                            popped_name = self.get_item_name(popped_info, f"Item ({popped_id})")
+                            self.append_log(f"[QUEUE] Chest opened: {popped_name}. Remaining drops: {len(self.current_stage_queue)}\n")
+                            
+                            # Atualizar visual do card se for um item importante sendo coletado
+                            if popped_info:
+                                grade = popped_info.get("grade", "COMMON").upper()
+                                is_soulstone = "soulstone" in popped_name.lower() or "soul stone" in popped_name.lower()
+                                card_key = "SOULSTONE" if is_soulstone else grade
+                                
+                                if hasattr(self, 'upcoming_card_widgets') and card_key in self.upcoming_card_widgets:
+                                    widgets = self.upcoming_card_widgets[card_key]
+                                    current_display_name = widgets["lbl_name"].cget("text")
+                                    if current_display_name and popped_name in current_display_name and not current_display_name.startswith("✓"):
+                                        widgets["lbl_name"].configure(text=f"✓ Coletado: {popped_name}", text_color="#7f8c8d")
+                                        widgets["card"].configure(border_color="#2c3e50")
+                    except Exception:
+                        pass
+
             if not self.relogger_active:
                 return
             # Only act if a paused countdown is running (we found a target and are waiting)
@@ -2253,8 +2577,11 @@ class PeekerGUI(ctk.CTk):
             if self.safety_countdown_active:
                 return
             
-            seen_ids = data if isinstance(data, list) else []
             for item_id in seen_ids:
+                # Skip if in ignore list
+                if item_id in getattr(self, "ignored_items", []):
+                    continue
+
                 # Check specific item targets
                 if item_id in self.target_items:
                     info = self.get_item_info_by_id(item_id) or {}
@@ -2382,6 +2709,11 @@ class PeekerGUI(ctk.CTk):
             self.append_log(f"\n[CRITICAL ERROR] Error in evaluate_filters_and_relog: {e}\n{traceback.format_exc()}\n")
 
     def _evaluate_filters_and_relog_impl(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
+        if res_type == "chests":
+            self.current_stage_queue = list(found_item_ids)
+            self.current_chest_queue = list(chest_ids) if chest_ids else [None] * len(found_item_ids)
+            self.target_chest_index = None
+
         # Check if any target item is present (independent of relogger_active)
         target_found = False
         found_target_id = None
@@ -2390,6 +2722,10 @@ class PeekerGUI(ctk.CTk):
             item_indices = [1] * len(found_item_ids)
 
         for item_id, index in zip(found_item_ids, item_indices):
+            # Skip if in ignore list
+            if item_id in getattr(self, "ignored_items", []):
+                continue
+
             # 1. Check if matches specific item targets (ALWAYS matches regardless of index)
             if item_id in self.target_items:
                 target_found = True
@@ -2458,10 +2794,34 @@ class PeekerGUI(ctk.CTk):
             # Auto-Relogger specific actions
             if self.relogger_active:
                 if res_type == "chests":
+                    # Calcular cooldown dinâmico (paralelo)
+                    wait_duration = self.pause_duration
+                    try:
+                        target_idx = self.current_stage_queue.index(found_target_id)
+                        self.target_chest_index = target_idx + 1
+                        
+                        # O Grid de 50 baús corre em paralelo:
+                        # Baús 1 a 30 (índices 0 a 29) são normais (Uncommon)
+                        # Baús 31 a 50 (índices 30 a 49) são de chefe (Rare)
+                        if target_idx < 30:
+                            estimated_secs = (target_idx + 1) * self.uncommon_chest_cooldown
+                        else:
+                            estimated_secs = (target_idx - 29) * self.rare_chest_cooldown
+                        
+                        # Adicionar 120s de margem de segurança
+                        estimated_secs += 120
+                        wait_duration = max(self.pause_duration, estimated_secs)
+                    except ValueError:
+                        self.target_chest_index = None
+
                     self.append_log(f"[RELOGGER] TARGET ITEM FOUND in upcoming chests: {name} (ID: {found_target_id})!\n")
-                    self.append_log(f"[RELOGGER] Pausing automatic re-entry to let the game clear the stage and collect it. Will relaunch in {self.pause_duration} seconds.\n")
+                    if self.target_chest_index is not None:
+                        self.append_log(f"[RELOGGER] Target is at index #{self.target_chest_index} of sequence. Estimating wait time: {wait_duration // 60}m {wait_duration % 60}s ({wait_duration}s).\n")
+                    else:
+                        self.append_log(f"[RELOGGER] Pausing automatic re-entry to let the game clear the stage and collect it. Will relaunch in {wait_duration} seconds.\n")
+                    
                     # Start the paused countdown timer
-                    self.start_paused_countdown(self.pause_duration, name)
+                    self.start_paused_countdown(wait_duration, name)
                 else:
                     # target collected (res_type is direct or synthesis), restart to search next target!
                     self.append_log(f"[RELOGGER] TARGET ITEM COLLECTED: {name} (ID: {found_target_id}) via {res_type.upper()}!\n")
