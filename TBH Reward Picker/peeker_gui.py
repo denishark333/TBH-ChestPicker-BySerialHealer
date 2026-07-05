@@ -43,16 +43,16 @@ COLOR_ENTRY_BG = "#111111"    # Dark entry background
 COLOR_BORDER = "#2f2f2f"      # Soft border color
  
 GRADE_COLORS = {
-    "COMMON": "#95a5a6",
-    "UNCOMMON": "#2ecc71",
-    "RARE": "#3498db",
-    "LEGENDARY": "#e67e22",
-    "IMMORTAL": "#911a1b",      # Darker red
-    "ARCANA": "#9b59b6",        # Purple
-    "BEYOND": "#1abc9c",
-    "CELESTIAL": "#00d2d3",     # Cyan
-    "DIVINE": "#f1c40f",        # Gold
-    "COSMIC": "#fd79a8",
+    "COMMON": "#e4e4e4",
+    "UNCOMMON": "#54fc0c",
+    "RARE": "#2f8bfc",
+    "LEGENDARY": "#fc9c0c",
+    "IMMORTAL": "#fc2424",
+    "ARCANA": "#b40cfc",
+    "BEYOND": "#fc246c",
+    "CELESTIAL": "#6ccce4",
+    "DIVINE": "#fce454",
+    "COSMIC": "#fcfcfc",
     "BOSS": "#00a8ff",          # Bright blue/cyan for Stage Boss Box
     "SOULSTONE": "#e74c3c"      # Red/crimson for Soulstone card
 }
@@ -116,6 +116,8 @@ class PeekerGUI(ctk.CTk):
         self.dashboard_last_activity = "Ready"
         self.sprite_mapping = {}
         self.load_peeker_config()
+        self.market_price_cache = {}
+        self.load_market_cache()
  
         # Execution state
         self.proxy_process: subprocess.Popen | None = None
@@ -200,6 +202,77 @@ class PeekerGUI(ctk.CTk):
             PEEKER_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception as e:
             self.append_log(f"[ERROR] Failed to save config: {e}\n")
+
+    def load_market_cache(self) -> None:
+        """Carrega o cache de preços do arquivo local."""
+        self.market_price_cache = {}
+        cache_path = ROOT / "market_cache.json"
+        if cache_path.exists():
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    self.market_price_cache = json.load(f)
+            except Exception:
+                pass
+
+    def save_market_cache(self) -> None:
+        """Salva o cache de preços no arquivo local."""
+        cache_path = ROOT / "market_cache.json"
+        try:
+            with open(cache_path, "w", encoding="utf-8") as f:
+                json.dump(self.market_price_cache, f, indent=2)
+        except Exception:
+            pass
+
+    def fetch_steam_market_price(self, item_name: str, callback) -> None:
+        """Busca o preço do item, respeitando o cooldown incondicional de 12 horas."""
+        now = time.time()
+        max_cache_age = 12 * 3600  # 12 horas em segundos
+        
+        # Se o item já foi consultado (com sucesso, erro ou indisponível) dentro de 12h, 
+        # usa a resposta do cache de forma incondicional.
+        if item_name in self.market_price_cache:
+            item_data = self.market_price_cache[item_name]
+            cached_time = item_data.get("timestamp", 0)
+            cached_price = item_data.get("price", "N/A")
+            
+            if now - cached_time < max_cache_age:
+                callback(cached_price)
+                return
+
+        # Caso contrário, dispara a thread para consultar a Steam
+        def worker():
+            import urllib.request
+            import urllib.parse
+            import json
+            
+            price_str = "N/A"
+            try:
+                encoded_name = urllib.parse.quote(item_name)
+                url = f"https://steamcommunity.com/market/priceoverview/?appid=3678970&currency=7&market_hash_name={encoded_name}"
+                
+                req = urllib.request.Request(
+                    url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                    }
+                )
+                with urllib.request.urlopen(req, timeout=6) as response:
+                    data = json.loads(response.read().decode('utf-8'))
+                    if data.get("success"):
+                        price_str = data.get("lowest_price", data.get("median_price", "N/A"))
+            except Exception:
+                price_str = "N/A"
+            
+            # Salva o resultado (preço real ou N/A) no cache com o timestamp atual
+            self.market_price_cache[item_name] = {
+                "price": price_str,
+                "timestamp": now
+            }
+            self.save_market_cache()
+            
+            self.after(0, lambda: callback(price_str))
+
+        threading.Thread(target=worker, daemon=True).start()
  
     # =====================================================================
     # UI Layout & Construction
@@ -367,8 +440,15 @@ class PeekerGUI(ctk.CTk):
             details_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
             details_frame.pack(side="left", fill="both", expand=True)
             
-            lbl_name = ctk.CTkLabel(details_frame, text="No drop yet", font=ctk.CTkFont(size=10, weight="bold"), text_color=COLOR_TEXT, wraplength=140, justify="left", anchor="w")
-            lbl_name.pack(fill="x", anchor="w")
+            # Sub-frame for name and price side-by-side
+            name_price_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
+            name_price_frame.pack(fill="x", anchor="w")
+
+            lbl_name = ctk.CTkLabel(name_price_frame, text="No drop yet", font=ctk.CTkFont(family="Inter", size=15, weight="bold"), text_color=COLOR_TEXT, wraplength=120, justify="left", anchor="w")
+            lbl_name.pack(side="left")
+
+            lbl_price = ctk.CTkLabel(name_price_frame, text="", font=ctk.CTkFont(family="Inter", size=17, weight="bold"), text_color=COLOR_PRIMARY, justify="left", anchor="w")
+            lbl_price.pack(side="left", padx=(6, 0))
             
             # Chest info row (hidden by default)
             chest_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
@@ -389,6 +469,7 @@ class PeekerGUI(ctk.CTk):
             self.upcoming_card_widgets[rarity] = {
                 "card": card,
                 "lbl_name": lbl_name,
+                "lbl_price": lbl_price,
                 "lbl_item_icon": lbl_item_icon,
                 "chest_frame": chest_frame,
                 "lbl_from": lbl_from,
@@ -472,8 +553,12 @@ class PeekerGUI(ctk.CTk):
         self.lbl_next_drop_icon._my_image_ref = self.placeholder_image
         
         self.next_drop_var = ctk.StringVar(value="Waiting for scan...")
-        self.lbl_next_drop = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_var, font=ctk.CTkFont(size=11), text_color=COLOR_MUTED, wraplength=280, justify="left", anchor="w")
-        self.lbl_next_drop.pack(side="left", fill="both", expand=True)
+        self.lbl_next_drop = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_var, font=ctk.CTkFont(family="Inter", size=15, weight="bold"), text_color=COLOR_MUTED, wraplength=200, justify="left", anchor="w")
+        self.lbl_next_drop.pack(side="left")
+        
+        self.next_drop_price_var = ctk.StringVar(value="")
+        self.lbl_next_drop_price = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_price_var, font=ctk.CTkFont(family="Inter", size=17, weight="bold"), text_color=COLOR_PRIMARY, justify="left", anchor="w")
+        self.lbl_next_drop_price.pack(side="left", padx=(6, 0))
 
         footer = ctk.CTkLabel(self.dashboard_content, text="Powered by: SH", font=ctk.CTkFont(size=11), text_color=COLOR_MUTED)
         footer.grid(row=3, column=0, columnspan=2, sticky="s", pady=(12, 0))
@@ -839,6 +924,8 @@ class PeekerGUI(ctk.CTk):
             # Reset all cards to "No drop yet" to ensure dynamism
             for rarity, widgets in self.upcoming_card_widgets.items():
                 widgets["lbl_name"].configure(text="No drop yet")
+                if "lbl_price" in widgets:
+                    widgets["lbl_price"].configure(text="")
                 
                 # Reset card border color
                 color = GRADE_COLORS.get(rarity, COLOR_BORDER)
@@ -873,6 +960,8 @@ class PeekerGUI(ctk.CTk):
 
             if hasattr(self, "next_drop_var"):
                 self.next_drop_var.set("No valuable drops")
+                if hasattr(self, "next_drop_price_var"):
+                    self.next_drop_price_var.set("")
                 if hasattr(self, "lbl_next_drop"):
                     self.lbl_next_drop.configure(text_color=COLOR_MUTED)
                 if hasattr(self, "lbl_next_drop_icon"):
@@ -912,6 +1001,12 @@ class PeekerGUI(ctk.CTk):
                     item_name = self.get_item_name(info, "Unknown")
                     widgets = self.upcoming_card_widgets[grade]
                     widgets["lbl_name"].configure(text=item_name)
+                    
+                    # Fetch price in background and update card price label
+                    if "lbl_price" in widgets:
+                        def make_card_price_callback(w_price):
+                            return lambda price: w_price.configure(text=f"|  {price}" if price and price != "N/A" else "|  N/A")
+                        self.fetch_steam_market_price(item_name, make_card_price_callback(widgets["lbl_price"]))
                     
                     # Fetch and load item sprite (main thread instantiation)
                     self.get_sprite_image(item_id, callback=lambda pil, w=widgets["lbl_item_icon"]: self.set_widget_image(w, pil, (32, 32)))
@@ -953,6 +1048,13 @@ class PeekerGUI(ctk.CTk):
                 # Update item name
                 widgets["lbl_name"].configure(text=self.get_item_name(best_soulstone_info, "Unknown"))
                 
+                # Fetch price in background and update card price label
+                if "lbl_price" in widgets:
+                    s_name = self.get_item_name(best_soulstone_info, "Unknown")
+                    def make_card_price_callback(w_price):
+                        return lambda price: w_price.configure(text=f"|  {price}" if price and price != "N/A" else "|  N/A")
+                    self.fetch_steam_market_price(s_name, make_card_price_callback(widgets["lbl_price"]))
+                
                 # Load item sprite (main thread instantiation)
                 self.get_sprite_image(best_soulstone_id, callback=lambda pil, w=widgets["lbl_item_icon"]: self.set_widget_image(w, pil, (32, 32)))
                 
@@ -987,14 +1089,24 @@ class PeekerGUI(ctk.CTk):
                 name = self.get_item_name(highest_grade_item, "Unknown")
                 grade = highest_grade_item.get("grade", "COMMON")
                 item_id = highest_grade_item.get("id")
-                self.next_drop_var.set(f"{name} [{grade}]")
+                self.next_drop_var.set(name)
                 if hasattr(self, "lbl_next_drop"):
                     color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
                     self.lbl_next_drop.configure(text_color=color)
                 if hasattr(self, "lbl_next_drop_icon") and item_id is not None:
                     self.get_sprite_image(item_id, callback=lambda pil, w=self.lbl_next_drop_icon: self.set_widget_image(w, pil, (32, 32)))
+                     # Fetch price in background and update price label
+                def update_price_callback(price):
+                    if price and price != "N/A":
+                        self.next_drop_price_var.set(f"|  {price}")
+                    else:
+                        self.next_drop_price_var.set("|  N/A")
+                
+                self.fetch_steam_market_price(name, update_price_callback)
             elif hasattr(self, "next_drop_var"):
                 self.next_drop_var.set("No valuable drops")
+                if hasattr(self, "next_drop_price_var"):
+                    self.next_drop_price_var.set("")
                 if hasattr(self, "lbl_next_drop"):
                     self.lbl_next_drop.configure(text_color=COLOR_MUTED)
                 if hasattr(self, "lbl_next_drop_icon"):
