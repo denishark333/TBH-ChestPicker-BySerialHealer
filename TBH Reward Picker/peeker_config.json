@@ -32,5 +32,8 @@
   "trainer_auto_launch": false,
   "trainer_path": "",
   "relog_safety_delay": 35,
-  "max_chest_index": 10
+  "max_chest_index": 10,
+  "telegram_notify_enabled": false,
+  "telegram_bot_token": "",
+  "telegram_chat_id": ""
 }

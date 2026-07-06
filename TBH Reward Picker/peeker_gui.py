@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
  
 import json
 import os
@@ -21,6 +21,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image
+
+from telegram_notifier import TelegramNotifier
  
 # Import winsound on Windows for alerts
 try:
@@ -104,6 +106,9 @@ class PeekerGUI(ctk.CTk):
         self.discord_notify_enabled = False
         self.discord_webhook_url = ""
         self.discord_user_id = ""
+        self.telegram_notify_enabled = False
+        self.telegram_bot_token = ""
+        self.telegram_chat_id = ""
         self.trainer_auto_launch = False
         self.trainer_path = str(ROOT / "TBH Trainer.exe")
         self.relog_safety_delay = 45  # seconds to wait after collecting item before relogging (anti-rollback)
@@ -170,6 +175,9 @@ class PeekerGUI(ctk.CTk):
                 self.discord_notify_enabled = data.get("discord_notify_enabled", False)
                 self.discord_webhook_url = data.get("discord_webhook_url", "")
                 self.discord_user_id = data.get("discord_user_id", "")
+                self.telegram_notify_enabled = data.get("telegram_notify_enabled", False)
+                self.telegram_bot_token = data.get("telegram_bot_token", "")
+                self.telegram_chat_id = data.get("telegram_chat_id", "")
                 self.trainer_auto_launch = data.get("trainer_auto_launch", False)
                 self.trainer_path = data.get("trainer_path", str(ROOT / "TBH Trainer.exe"))
                 self.relog_safety_delay = data.get("relog_safety_delay", 45)
@@ -192,6 +200,9 @@ class PeekerGUI(ctk.CTk):
                 "discord_notify_enabled": self.discord_notify_enabled,
                 "discord_webhook_url": self.discord_webhook_url,
                 "discord_user_id": self.discord_user_id,
+                "telegram_notify_enabled": self.telegram_notify_enabled,
+                "telegram_bot_token": self.telegram_bot_token,
+                "telegram_chat_id": self.telegram_chat_id,
                 "trainer_auto_launch": self.trainer_auto_launch,
                 "trainer_path": self.trainer_path,
                 "relog_safety_delay": self.relog_safety_delay,
@@ -1722,6 +1733,92 @@ class PeekerGUI(ctk.CTk):
         )
         self.btn_test_webhook.pack(fill="x", padx=5, pady=(15, 5))
  
+        telegram_divider = ctk.CTkFrame(scroll_frame, height=2, fg_color=COLOR_BORDER)
+        telegram_divider.pack(fill="x", pady=15)
+ 
+        lbl_telegram_title = ctk.CTkLabel(
+            scroll_frame,
+            text="Telegram Bot Notifications",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_telegram_title.pack(anchor="w", padx=5, pady=(5, 10))
+ 
+        self.telegram_notify_var = ctk.BooleanVar(value=self.telegram_notify_enabled)
+        cb_telegram = ctk.CTkCheckBox(
+            scroll_frame,
+            text="Enable Telegram Notifications",
+            variable=self.telegram_notify_var,
+            command=self.on_telegram_notify_toggled,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT
+        )
+        cb_telegram.pack(anchor="w", padx=15, pady=5)
+ 
+        lbl_telegram_token = ctk.CTkLabel(
+            scroll_frame,
+            text="Telegram BotFather Token:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_telegram_token.pack(anchor="w", padx=5, pady=(10, 2))
+ 
+        self.entry_telegram_bot_token = ctk.CTkEntry(
+            scroll_frame,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="123456789:AA...",
+            font=ctk.CTkFont(size=11),
+            show="*"
+        )
+        self.entry_telegram_bot_token.pack(fill="x", padx=5, pady=5)
+        self.entry_telegram_bot_token.insert(0, self.telegram_bot_token)
+        self.entry_telegram_bot_token.bind("<KeyRelease>", self.on_telegram_bot_token_typed)
+ 
+        lbl_telegram_chat = ctk.CTkLabel(
+            scroll_frame,
+            text="Telegram Chat ID:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_telegram_chat.pack(anchor="w", padx=5, pady=(5, 2))
+ 
+        self.entry_telegram_chat_id = ctk.CTkEntry(
+            scroll_frame,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="Send /start to the bot, then click Detect Chat ID",
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_telegram_chat_id.pack(fill="x", padx=5, pady=2)
+        self.entry_telegram_chat_id.insert(0, self.telegram_chat_id)
+        self.entry_telegram_chat_id.bind("<KeyRelease>", self.on_telegram_chat_id_typed)
+ 
+        telegram_buttons = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        telegram_buttons.pack(fill="x", padx=5, pady=(10, 5))
+ 
+        self.btn_detect_telegram_chat = ctk.CTkButton(
+            telegram_buttons,
+            text="Detect Chat ID",
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.detect_telegram_chat_id
+        )
+        self.btn_detect_telegram_chat.pack(side="left", fill="x", expand=True, padx=(0, 5))
+ 
+        self.btn_test_telegram = ctk.CTkButton(
+            telegram_buttons,
+            text="Send Telegram Test",
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.send_test_telegram_notification
+        )
+        self.btn_test_telegram.pack(side="left", fill="x", expand=True, padx=(5, 0))
+ 
         # Divider Line
         divider = ctk.CTkFrame(scroll_frame, height=2, fg_color=COLOR_BORDER)
         divider.pack(fill="x", pady=15)
@@ -1817,6 +1914,80 @@ class PeekerGUI(ctk.CTk):
         self.discord_user_id = self.entry_discord_user_id.get().strip()
         self.save_peeker_config()
  
+    def on_telegram_notify_toggled(self) -> None:
+        self.telegram_notify_enabled = self.telegram_notify_var.get()
+        self.save_peeker_config()
+        self.append_log(f"[TELEGRAM] Telegram notification enabled: {self.telegram_notify_enabled}\n")
+ 
+    def on_telegram_bot_token_typed(self, event: Any) -> None:
+        self.telegram_bot_token = self.entry_telegram_bot_token.get().strip()
+        self.save_peeker_config()
+ 
+    def on_telegram_chat_id_typed(self, event: Any) -> None:
+        self.telegram_chat_id = self.entry_telegram_chat_id.get().strip()
+        self.save_peeker_config()
+ 
+    def detect_telegram_chat_id(self) -> None:
+        token = self.entry_telegram_bot_token.get().strip()
+        if not token:
+            self.append_log("[TELEGRAM] Cannot detect Chat ID: bot token is empty.\n")
+            return
+ 
+        self.append_log("[TELEGRAM] Detecting Chat ID from recent bot messages...\n")
+ 
+        def run_detect():
+            success, msg, chat_id = TelegramNotifier(token).detect_chat_id()
+            if not success:
+                self.after(0, lambda: self.append_log(f"[TELEGRAM] [ERROR] Failed to detect Chat ID: {msg}\n"))
+                return
+ 
+            def apply_chat_id():
+                self.telegram_chat_id = chat_id
+                self.entry_telegram_chat_id.delete(0, "end")
+                self.entry_telegram_chat_id.insert(0, chat_id)
+                self.save_peeker_config()
+                self.append_log(f"[TELEGRAM] Chat ID detected and saved: {chat_id}\n")
+ 
+            self.after(0, apply_chat_id)
+ 
+        threading.Thread(target=run_detect, daemon=True).start()
+ 
+    def send_test_telegram_notification(self) -> None:
+        token = self.entry_telegram_bot_token.get().strip()
+        chat_id = self.entry_telegram_chat_id.get().strip()
+        if not token or not chat_id:
+            self.append_log("[TELEGRAM] Cannot send test notification: token or Chat ID is empty.\n")
+            return
+ 
+        self.telegram_bot_token = token
+        self.telegram_chat_id = chat_id
+        self.save_peeker_config()
+        self.append_log("[TELEGRAM] Sending test notification...\n")
+ 
+        def run_test():
+            success, msg = TelegramNotifier(token, chat_id).send_message(
+                "TBH Chest Peeker test notification. Telegram alerts are working."
+            )
+            if success:
+                self.after(0, lambda: self.append_log("[TELEGRAM] Test notification sent successfully!\n"))
+            else:
+                self.after(0, lambda: self.append_log(f"[TELEGRAM] [ERROR] Failed to send test notification: {msg}\n"))
+ 
+        threading.Thread(target=run_test, daemon=True).start()
+ 
+    def notify_telegram_match(self, item_id: int, item_name: str, grade: str, action_type: str) -> None:
+        if not self.telegram_notify_enabled or not self.telegram_bot_token or not self.telegram_chat_id:
+            return
+ 
+        token = self.telegram_bot_token
+        chat_id = self.telegram_chat_id
+ 
+        def run_notify():
+            success, msg = TelegramNotifier(token, chat_id).send_target_alert(item_id, item_name, grade, action_type)
+            if not success:
+                self.after(0, lambda: self.append_log(f"[TELEGRAM] [ERROR] Failed to send alert: {msg}\n"))
+ 
+        threading.Thread(target=run_notify, daemon=True).start()
     def send_test_discord_notification(self) -> None:
         url = self.entry_webhook_url.get().strip()
         if not url:
@@ -2879,6 +3050,7 @@ class PeekerGUI(ctk.CTk):
             
             # Send Discord Notification if enabled
             self.notify_discord_match(found_target_id, name, grade, res_type)
+            self.notify_telegram_match(found_target_id, name, grade, res_type)
             
             # Play alert sound in a separate thread so it doesn't freeze the GUI
             def play_alert():
