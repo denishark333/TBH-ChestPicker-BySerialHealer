@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
  
 import json
 import os
@@ -21,6 +21,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image
+
+from telegram_notifier import TelegramNotifier
  
 # Import winsound on Windows for alerts
 try:
@@ -104,6 +106,9 @@ class PeekerGUI(ctk.CTk):
         self.discord_notify_enabled = False
         self.discord_webhook_url = ""
         self.discord_user_id = ""
+        self.telegram_notify_enabled = False
+        self.telegram_bot_token = ""
+        self.telegram_chat_id = ""
         self.trainer_auto_launch = False
         self.trainer_path = str(ROOT / "TBH Trainer.exe")
         self.relog_safety_delay = 45  # seconds to wait after collecting item before relogging (anti-rollback)
@@ -170,6 +175,9 @@ class PeekerGUI(ctk.CTk):
                 self.discord_notify_enabled = data.get("discord_notify_enabled", False)
                 self.discord_webhook_url = data.get("discord_webhook_url", "")
                 self.discord_user_id = data.get("discord_user_id", "")
+                self.telegram_notify_enabled = data.get("telegram_notify_enabled", False)
+                self.telegram_bot_token = data.get("telegram_bot_token", "")
+                self.telegram_chat_id = data.get("telegram_chat_id", "")
                 self.trainer_auto_launch = data.get("trainer_auto_launch", False)
                 self.trainer_path = data.get("trainer_path", str(ROOT / "TBH Trainer.exe"))
                 self.relog_safety_delay = data.get("relog_safety_delay", 45)
@@ -192,6 +200,9 @@ class PeekerGUI(ctk.CTk):
                 "discord_notify_enabled": self.discord_notify_enabled,
                 "discord_webhook_url": self.discord_webhook_url,
                 "discord_user_id": self.discord_user_id,
+                "telegram_notify_enabled": self.telegram_notify_enabled,
+                "telegram_bot_token": self.telegram_bot_token,
+                "telegram_chat_id": self.telegram_chat_id,
                 "trainer_auto_launch": self.trainer_auto_launch,
                 "trainer_path": self.trainer_path,
                 "relog_safety_delay": self.relog_safety_delay,
@@ -204,7 +215,7 @@ class PeekerGUI(ctk.CTk):
             self.append_log(f"[ERROR] Failed to save config: {e}\n")
 
     def load_market_cache(self) -> None:
-        """Carrega o cache de preços do arquivo local."""
+        """Carrega o cache de preÃ§os do arquivo local."""
         self.market_price_cache = {}
         cache_path = ROOT / "market_cache.json"
         if cache_path.exists():
@@ -215,7 +226,7 @@ class PeekerGUI(ctk.CTk):
                 pass
 
     def save_market_cache(self) -> None:
-        """Salva o cache de preços no arquivo local."""
+        """Salva o cache de preÃ§os no arquivo local."""
         cache_path = ROOT / "market_cache.json"
         try:
             with open(cache_path, "w", encoding="utf-8") as f:
@@ -224,11 +235,11 @@ class PeekerGUI(ctk.CTk):
             pass
 
     def fetch_steam_market_price(self, item_name: str, callback) -> None:
-        """Busca o preço do item, respeitando o cooldown incondicional de 12 horas."""
+        """Busca o preÃ§o do item, respeitando o cooldown incondicional de 12 horas."""
         now = time.time()
         max_cache_age = 12 * 3600  # 12 horas em segundos
         
-        # Se o item já foi consultado (com sucesso, erro ou indisponível) dentro de 12h, 
+        # Se o item jÃ¡ foi consultado (com sucesso, erro ou indisponÃ­vel) dentro de 12h, 
         # usa a resposta do cache de forma incondicional.
         if item_name in self.market_price_cache:
             item_data = self.market_price_cache[item_name]
@@ -239,7 +250,7 @@ class PeekerGUI(ctk.CTk):
                 callback(cached_price)
                 return
 
-        # Caso contrário, dispara a thread para consultar a Steam
+        # Caso contrÃ¡rio, dispara a thread para consultar a Steam
         def worker():
             import urllib.request
             import urllib.parse
@@ -263,7 +274,7 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 price_str = "N/A"
             
-            # Salva o resultado (preço real ou N/A) no cache com o timestamp atual
+            # Salva o resultado (preÃ§o real ou N/A) no cache com o timestamp atual
             self.market_price_cache[item_name] = {
                 "price": price_str,
                 "timestamp": now
@@ -485,7 +496,7 @@ class PeekerGUI(ctk.CTk):
         self.btn_bot.pack(fill="x", padx=15, pady=(0, 8))
         self.btn_force_relaunch = ctk.CTkButton(self.bot_frame, text="Force Relaunch Game", fg_color="#3498db", hover_color="#2980b9", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.force_relaunch_game, height=36)
         self.btn_force_relaunch.pack(fill="x", padx=15, pady=(0, 8))
-        self.btn_item_collected = ctk.CTkButton(self.bot_frame, text="✅ Item Collected → Relog Now", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.skip_to_safety_relog, height=36)
+        self.btn_item_collected = ctk.CTkButton(self.bot_frame, text="âœ… Item Collected â†’ Relog Now", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.skip_to_safety_relog, height=36)
         self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
         self.btn_item_collected.pack_forget()
 
@@ -784,7 +795,7 @@ class PeekerGUI(ctk.CTk):
             return
         color = rarity_color or GRADE_COLORS.get((grade or "").upper(), COLOR_PRIMARY)
         self.alert_banner.configure(border_color=color, fg_color="#151515")
-        self.alert_banner_label.configure(text=f"Alert: {item_name or 'Target detected'} • {(grade or 'UNKNOWN').upper()}", text_color=color)
+        self.alert_banner_label.configure(text=f"Alert: {item_name or 'Target detected'} â€¢ {(grade or 'UNKNOWN').upper()}", text_color=color)
         if hasattr(self, "lbl_alert_icon"):
             if item_id is not None:
                 self.get_sprite_image(item_id, callback=lambda pil, w=self.lbl_alert_icon: self.set_widget_image(w, pil, (32, 32)))
@@ -1394,7 +1405,7 @@ class PeekerGUI(ctk.CTk):
  
         self.btn_item_collected = ctk.CTkButton(
             self.bot_frame,
-            text="✅ Item Collected → Relog Now",
+            text="âœ… Item Collected â†’ Relog Now",
             fg_color="#e67e22",
             hover_color="#d35400",
             text_color=COLOR_TEXT,
@@ -1477,14 +1488,14 @@ class PeekerGUI(ctk.CTk):
         actions_frame.grid_columnconfigure(1, weight=1)
 
         self.btn_add_filter = ctk.CTkButton(
-            actions_frame, text="Add to Targets 🎯",
+            actions_frame, text="Add to Targets ðŸŽ¯",
             fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.add_target_item
         )
         self.btn_add_filter.grid(row=0, column=0, padx=(0, 4), sticky="ew")
 
         self.btn_add_ignore = ctk.CTkButton(
-            actions_frame, text="Add to Ignore List ⛔",
+            actions_frame, text="Add to Ignore List â›”",
             fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.add_ignored_item
         )
@@ -1502,7 +1513,7 @@ class PeekerGUI(ctk.CTk):
         targets_panel = ctk.CTkFrame(split_frame, fg_color="#141414", border_color=COLOR_BORDER, border_width=1)
         targets_panel.grid(row=0, column=0, padx=(0, 6), pady=5, sticky="nsew")
 
-        lbl_t_title = ctk.CTkLabel(targets_panel, text="Active Target List 🎯", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
+        lbl_t_title = ctk.CTkLabel(targets_panel, text="Active Target List ðŸŽ¯", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
         lbl_t_title.pack(anchor="w", padx=12, pady=(10, 5))
 
         self.target_box_container = ctk.CTkFrame(targets_panel, fg_color="transparent", height=130)
@@ -1550,7 +1561,7 @@ class PeekerGUI(ctk.CTk):
         ignores_panel = ctk.CTkFrame(split_frame, fg_color="#141414", border_color=COLOR_BORDER, border_width=1)
         ignores_panel.grid(row=0, column=1, padx=(6, 0), pady=5, sticky="nsew")
 
-        lbl_i_title = ctk.CTkLabel(ignores_panel, text="Active Ignore List ⛔", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
+        lbl_i_title = ctk.CTkLabel(ignores_panel, text="Active Ignore List â›”", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
         lbl_i_title.pack(anchor="w", padx=12, pady=(10, 5))
 
         self.ignore_box_container = ctk.CTkFrame(ignores_panel, fg_color="transparent", height=130)
@@ -1632,7 +1643,7 @@ class PeekerGUI(ctk.CTk):
  
         lbl_except = ctk.CTkLabel(
             scroll_frame,
-            text="⚠️ Note: Soulstones are automatically EXCLUDED from grade-based matching to prevent useless stops.",
+            text="âš ï¸ Note: Soulstones are automatically EXCLUDED from grade-based matching to prevent useless stops.",
             font=ctk.CTkFont(size=11, slant="italic"),
             text_color=COLOR_PRIMARY,
             wraplength=300,
@@ -1705,7 +1716,7 @@ class PeekerGUI(ctk.CTk):
             fg_color=COLOR_ENTRY_BG,
             border_color=COLOR_BORDER,
             text_color=COLOR_TEXT,
-            placeholder_text="Right-click profile → Copy User ID",
+            placeholder_text="Right-click profile â†’ Copy User ID",
             font=ctk.CTkFont(size=11)
         )
         self.entry_discord_user_id.pack(fill="x", padx=5, pady=2)
@@ -1721,6 +1732,92 @@ class PeekerGUI(ctk.CTk):
             command=self.send_test_discord_notification
         )
         self.btn_test_webhook.pack(fill="x", padx=5, pady=(15, 5))
+ 
+        telegram_divider = ctk.CTkFrame(scroll_frame, height=2, fg_color=COLOR_BORDER)
+        telegram_divider.pack(fill="x", pady=15)
+ 
+        lbl_telegram_title = ctk.CTkLabel(
+            scroll_frame,
+            text="Telegram Bot Notifications",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_telegram_title.pack(anchor="w", padx=5, pady=(5, 10))
+ 
+        self.telegram_notify_var = ctk.BooleanVar(value=self.telegram_notify_enabled)
+        cb_telegram = ctk.CTkCheckBox(
+            scroll_frame,
+            text="Enable Telegram Notifications",
+            variable=self.telegram_notify_var,
+            command=self.on_telegram_notify_toggled,
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT
+        )
+        cb_telegram.pack(anchor="w", padx=15, pady=5)
+ 
+        lbl_telegram_token = ctk.CTkLabel(
+            scroll_frame,
+            text="Telegram BotFather Token:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_telegram_token.pack(anchor="w", padx=5, pady=(10, 2))
+ 
+        self.entry_telegram_bot_token = ctk.CTkEntry(
+            scroll_frame,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="123456789:AA...",
+            font=ctk.CTkFont(size=11),
+            show="*"
+        )
+        self.entry_telegram_bot_token.pack(fill="x", padx=5, pady=5)
+        self.entry_telegram_bot_token.insert(0, self.telegram_bot_token)
+        self.entry_telegram_bot_token.bind("<KeyRelease>", self.on_telegram_bot_token_typed)
+ 
+        lbl_telegram_chat = ctk.CTkLabel(
+            scroll_frame,
+            text="Telegram Chat ID:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_telegram_chat.pack(anchor="w", padx=5, pady=(5, 2))
+ 
+        self.entry_telegram_chat_id = ctk.CTkEntry(
+            scroll_frame,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="Send /start to the bot, then click Detect Chat ID",
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_telegram_chat_id.pack(fill="x", padx=5, pady=2)
+        self.entry_telegram_chat_id.insert(0, self.telegram_chat_id)
+        self.entry_telegram_chat_id.bind("<KeyRelease>", self.on_telegram_chat_id_typed)
+ 
+        telegram_buttons = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+        telegram_buttons.pack(fill="x", padx=5, pady=(10, 5))
+ 
+        self.btn_detect_telegram_chat = ctk.CTkButton(
+            telegram_buttons,
+            text="Detect Chat ID",
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.detect_telegram_chat_id
+        )
+        self.btn_detect_telegram_chat.pack(side="left", fill="x", expand=True, padx=(0, 5))
+ 
+        self.btn_test_telegram = ctk.CTkButton(
+            telegram_buttons,
+            text="Send Telegram Test",
+            fg_color=COLOR_SECONDARY,
+            hover_color=COLOR_SEC_HOVER,
+            command=self.send_test_telegram_notification
+        )
+        self.btn_test_telegram.pack(side="left", fill="x", expand=True, padx=(5, 0))
  
         # Divider Line
         divider = ctk.CTkFrame(scroll_frame, height=2, fg_color=COLOR_BORDER)
@@ -1817,6 +1914,80 @@ class PeekerGUI(ctk.CTk):
         self.discord_user_id = self.entry_discord_user_id.get().strip()
         self.save_peeker_config()
  
+    def on_telegram_notify_toggled(self) -> None:
+        self.telegram_notify_enabled = self.telegram_notify_var.get()
+        self.save_peeker_config()
+        self.append_log(f"[TELEGRAM] Telegram notification enabled: {self.telegram_notify_enabled}\n")
+ 
+    def on_telegram_bot_token_typed(self, event: Any) -> None:
+        self.telegram_bot_token = self.entry_telegram_bot_token.get().strip()
+        self.save_peeker_config()
+ 
+    def on_telegram_chat_id_typed(self, event: Any) -> None:
+        self.telegram_chat_id = self.entry_telegram_chat_id.get().strip()
+        self.save_peeker_config()
+ 
+    def detect_telegram_chat_id(self) -> None:
+        token = self.entry_telegram_bot_token.get().strip()
+        if not token:
+            self.append_log("[TELEGRAM] Cannot detect Chat ID: bot token is empty.\n")
+            return
+ 
+        self.append_log("[TELEGRAM] Detecting Chat ID from recent bot messages...\n")
+ 
+        def run_detect():
+            success, msg, chat_id = TelegramNotifier(token).detect_chat_id()
+            if not success:
+                self.after(0, lambda: self.append_log(f"[TELEGRAM] [ERROR] Failed to detect Chat ID: {msg}\n"))
+                return
+ 
+            def apply_chat_id():
+                self.telegram_chat_id = chat_id
+                self.entry_telegram_chat_id.delete(0, "end")
+                self.entry_telegram_chat_id.insert(0, chat_id)
+                self.save_peeker_config()
+                self.append_log(f"[TELEGRAM] Chat ID detected and saved: {chat_id}\n")
+ 
+            self.after(0, apply_chat_id)
+ 
+        threading.Thread(target=run_detect, daemon=True).start()
+ 
+    def send_test_telegram_notification(self) -> None:
+        token = self.entry_telegram_bot_token.get().strip()
+        chat_id = self.entry_telegram_chat_id.get().strip()
+        if not token or not chat_id:
+            self.append_log("[TELEGRAM] Cannot send test notification: token or Chat ID is empty.\n")
+            return
+ 
+        self.telegram_bot_token = token
+        self.telegram_chat_id = chat_id
+        self.save_peeker_config()
+        self.append_log("[TELEGRAM] Sending test notification...\n")
+ 
+        def run_test():
+            success, msg = TelegramNotifier(token, chat_id).send_message(
+                "TBH Chest Peeker test notification. Telegram alerts are working."
+            )
+            if success:
+                self.after(0, lambda: self.append_log("[TELEGRAM] Test notification sent successfully!\n"))
+            else:
+                self.after(0, lambda: self.append_log(f"[TELEGRAM] [ERROR] Failed to send test notification: {msg}\n"))
+ 
+        threading.Thread(target=run_test, daemon=True).start()
+ 
+    def notify_telegram_match(self, item_id: int, item_name: str, grade: str, action_type: str) -> None:
+        if not self.telegram_notify_enabled or not self.telegram_bot_token or not self.telegram_chat_id:
+            return
+ 
+        token = self.telegram_bot_token
+        chat_id = self.telegram_chat_id
+ 
+        def run_notify():
+            success, msg = TelegramNotifier(token, chat_id).send_target_alert(item_id, item_name, grade, action_type)
+            if not success:
+                self.after(0, lambda: self.append_log(f"[TELEGRAM] [ERROR] Failed to send alert: {msg}\n"))
+ 
+        threading.Thread(target=run_notify, daemon=True).start()
     def send_test_discord_notification(self) -> None:
         url = self.entry_webhook_url.get().strip()
         if not url:
@@ -1828,7 +1999,7 @@ class PeekerGUI(ctk.CTk):
         def run_test():
             payload = {
                 "username": "TBH Chest Peeker",
-                "content": "🔔 This is a test notification from your TBH Chest Peeker! Your Webhook configuration is working correctly."
+                "content": "ðŸ”” This is a test notification from your TBH Chest Peeker! Your Webhook configuration is working correctly."
             }
             success, msg = self.post_to_discord_webhook(url, payload)
             if success:
@@ -1882,15 +2053,15 @@ class PeekerGUI(ctk.CTk):
         }
         color = color_hex_map.get(grade.upper(), 0xbdc3c7) # default gray
         
-        title = "🎯 Target Item Filter Matched!"
+        title = "ðŸŽ¯ Target Item Filter Matched!"
         if action_type == "chests":
-            desc = f"**Item Found in Upcoming Chests!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger has paused to let you collect it.*"
+            desc = f"**Item Found in Upcoming Chests!**\n\nâ€¢ **Name**: {item_name}\nâ€¢ **ID**: {item_id}\nâ€¢ **Grade**: {grade}\n\n*The relogger has paused to let you collect it.*"
         elif action_type == "direct":
-            desc = f"**Item Collected (Direct Drop)!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
+            desc = f"**Item Collected (Direct Drop)!**\n\nâ€¢ **Name**: {item_name}\nâ€¢ **ID**: {item_id}\nâ€¢ **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
         elif action_type == "synthesis":
-            desc = f"**Item Collected (Synthesis)!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
+            desc = f"**Item Collected (Synthesis)!**\n\nâ€¢ **Name**: {item_name}\nâ€¢ **ID**: {item_id}\nâ€¢ **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
         else:
-            desc = f"**Item Detected!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}"
+            desc = f"**Item Detected!**\n\nâ€¢ **Name**: {item_name}\nâ€¢ **ID**: {item_id}\nâ€¢ **Grade**: {grade}"
             
         payload = {
             "username": "TBH Chest Peeker",
@@ -1970,7 +2141,7 @@ class PeekerGUI(ctk.CTk):
             self.txt_log.insert("end", f"[{idx}] {lbl_type}: ")
             self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
         else:
-            self.txt_log.insert("end", "   └─ Drop: ")
+            self.txt_log.insert("end", "   â””â”€ Drop: ")
             self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
             
         self.txt_log.see("end")
@@ -2616,7 +2787,7 @@ class PeekerGUI(ctk.CTk):
                     self.log_gui_error(f"Failed to parse result payload: {e}")
             return
         
-        # Debug traffic lines from proxy — show in log for traffic analysis
+        # Debug traffic lines from proxy â€” show in log for traffic analysis
         if cleaned.startswith("__PEEK_DEBUG__:"):
             parts = cleaned.split(":", 2)
             if len(parts) >= 3:
@@ -2629,7 +2800,7 @@ class PeekerGUI(ctk.CTk):
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         plain_line = ansi_escape.sub('', line)
         
-        if plain_line.strip() and not plain_line.startswith("=") and not plain_line.startswith(" Chest:") and not plain_line.startswith("    └─ Drop:"):
+        if plain_line.strip() and not plain_line.startswith("=") and not plain_line.startswith(" Chest:") and not plain_line.startswith("    â””â”€ Drop:"):
             self.after(0, lambda: self.append_log(plain_line))
  
     def process_peek_result(self, res_type: str, data: Any) -> None:
@@ -2645,7 +2816,7 @@ class PeekerGUI(ctk.CTk):
         self.dashboard_last_activity = f"Scan {self.dashboard_scans_done}"
         self.update_dashboard_stats()
         
-        # Handle 'seen' results silently — these are item IDs from any server response.
+        # Handle 'seen' results silently â€” these are item IDs from any server response.
         # If a target match is found while a countdown is running, auto-trigger safety relog.
         if res_type == "seen":
             seen_ids = data if isinstance(data, list) else []
@@ -2655,7 +2826,7 @@ class PeekerGUI(ctk.CTk):
                 if hasattr(self, 'current_stage_queue') and self.current_stage_queue and item_id in self.current_stage_queue:
                     try:
                         idx = self.current_stage_queue.index(item_id)
-                        # Desempilhar até o item atual (inclusive)
+                        # Desempilhar atÃ© o item atual (inclusive)
                         for _ in range(idx + 1):
                             popped_id = self.current_stage_queue.pop(0)
                             if hasattr(self, 'current_chest_queue') and self.current_chest_queue:
@@ -2674,8 +2845,8 @@ class PeekerGUI(ctk.CTk):
                                 if hasattr(self, 'upcoming_card_widgets') and card_key in self.upcoming_card_widgets:
                                     widgets = self.upcoming_card_widgets[card_key]
                                     current_display_name = widgets["lbl_name"].cget("text")
-                                    if current_display_name and popped_name in current_display_name and not current_display_name.startswith("✓"):
-                                        widgets["lbl_name"].configure(text=f"✓ Coletado: {popped_name}", text_color="#7f8c8d")
+                                    if current_display_name and popped_name in current_display_name and not current_display_name.startswith("âœ“"):
+                                        widgets["lbl_name"].configure(text=f"âœ“ Coletado: {popped_name}", text_color="#7f8c8d")
                                         widgets["card"].configure(border_color="#2c3e50")
                     except Exception:
                         pass
@@ -2698,7 +2869,7 @@ class PeekerGUI(ctk.CTk):
                 if item_id in self.target_items:
                     info = self.get_item_info_by_id(item_id) or {}
                     name = self.get_item_name(info, f"Item ({item_id})")
-                    self.append_log(f"\n[LIVE DETECT] 🎯 Target item '{name}' (ID: {item_id}) detected in server response!\n")
+                    self.append_log(f"\n[LIVE DETECT] ðŸŽ¯ Target item '{name}' (ID: {item_id}) detected in server response!\n")
                     self.append_log(f"[LIVE DETECT] Item has been collected! Switching to anti-rollback safety delay...\n")
                     self.skip_to_safety_relog()
                     return
@@ -2712,7 +2883,7 @@ class PeekerGUI(ctk.CTk):
                         if "soulstone" in name or "soul stone" in name:
                             continue
                         display_name = self.get_item_name(info, f"Item ({item_id})")
-                        self.append_log(f"\n[LIVE DETECT] 🎯 Target grade '{grade}' item '{display_name}' (ID: {item_id}) detected in server response!\n")
+                        self.append_log(f"\n[LIVE DETECT] ðŸŽ¯ Target grade '{grade}' item '{display_name}' (ID: {item_id}) detected in server response!\n")
                         self.append_log(f"[LIVE DETECT] Item has been collected! Switching to anti-rollback safety delay...\n")
                         self.skip_to_safety_relog()
                         return
@@ -2724,7 +2895,7 @@ class PeekerGUI(ctk.CTk):
             error_code = str(data)
             # Progressive backoff: 10s first, +5s each consecutive error, max 30s
             backoff = min(10 + (self.consecutive_errors - 1) * 5, 30)
-            self.append_log(f"\n[ERROR] ⚠ Server error detected (HTTP {error_code})! Error #{self.consecutive_errors}\n")
+            self.append_log(f"\n[ERROR] âš  Server error detected (HTTP {error_code})! Error #{self.consecutive_errors}\n")
             self.append_log(f"[ERROR] Backing off {backoff}s to let server/Steam session recover...\n")
  
             if self.relogger_active and self.relogger_method == "process_restart":
@@ -2746,7 +2917,7 @@ class PeekerGUI(ctk.CTk):
                 threading.Thread(target=error_recovery, daemon=True).start()
             return
  
-        # Valid game data received — reset error counter
+        # Valid game data received â€” reset error counter
         self.consecutive_errors = 0
  
         self.append_log(f"\n======================================================\n")
@@ -2877,8 +3048,9 @@ class PeekerGUI(ctk.CTk):
             self.update_dashboard_alert(name, grade, item_id=found_target_id)
             self.update_dashboard_stats()
             
-            # Send Discord Notification if enabled
+            # Send external notifications if enabled
             self.notify_discord_match(found_target_id, name, grade, res_type)
+            self.notify_telegram_match(found_target_id, name, grade, res_type)
             
             # Play alert sound in a separate thread so it doesn't freeze the GUI
             def play_alert():
@@ -2906,21 +3078,21 @@ class PeekerGUI(ctk.CTk):
             # Auto-Relogger specific actions
             if self.relogger_active:
                 if res_type == "chests":
-                    # Calcular cooldown dinâmico (paralelo)
+                    # Calcular cooldown dinÃ¢mico (paralelo)
                     wait_duration = self.pause_duration
                     try:
                         target_idx = self.current_stage_queue.index(found_target_id)
                         self.target_chest_index = target_idx + 1
                         
-                        # O Grid de 50 baús corre em paralelo:
-                        # Baús 1 a 30 (índices 0 a 29) são normais (Uncommon)
-                        # Baús 31 a 50 (índices 30 a 49) são de chefe (Rare)
+                        # O Grid de 50 baÃºs corre em paralelo:
+                        # BaÃºs 1 a 30 (Ã­ndices 0 a 29) sÃ£o normais (Uncommon)
+                        # BaÃºs 31 a 50 (Ã­ndices 30 a 49) sÃ£o de chefe (Rare)
                         if target_idx < 30:
                             estimated_secs = (target_idx + 1) * self.uncommon_chest_cooldown
                         else:
                             estimated_secs = (target_idx - 29) * self.rare_chest_cooldown
                         
-                        # Adicionar 120s de margem de segurança
+                        # Adicionar 120s de margem de seguranÃ§a
                         estimated_secs += 120
                         wait_duration = max(self.pause_duration, estimated_secs)
                     except ValueError:
@@ -3074,7 +3246,7 @@ class PeekerGUI(ctk.CTk):
             winsound.Beep(400, 250)
  
     def skip_to_safety_relog(self) -> None:
-        """User clicked 'Item Collected' — cancel long countdown, apply safety delay, then relog."""
+        """User clicked 'Item Collected' â€” cancel long countdown, apply safety delay, then relog."""
         self.append_log("[RELOGGER] User confirmed item collected!\n")
         
         # Cancel the long countdown

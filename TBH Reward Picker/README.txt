@@ -65,6 +65,40 @@ Abas Disponíveis:
   * Relatório detalhado dos drops observados na sessão com as cores de suas respectivas raridades.
 
 
+Guia de Notificacoes no Telegram:
+
+O painel pode enviar uma mensagem no Telegram sempre que um item alvo for encontrado. Para usar, voce precisa criar um bot no BotFather, iniciar conversa com ele e configurar o token/chat no app.
+
+1. Criar o bot no BotFather:
+   * Abra o Telegram e procure por "BotFather". Use o bot oficial verificado do Telegram.
+   * Envie o comando "/newbot".
+   * Escolha um nome para o bot, por exemplo "TBH Alerts".
+   * Escolha um username para o bot. Ele precisa terminar com "bot", por exemplo "meu_tbh_alerts_bot".
+   * O BotFather vai retornar um token parecido com "123456789:AA...". Esse valor inteiro e o Telegram BotFather Token.
+
+2. Iniciar conversa com o bot:
+   * Abra o bot que voce acabou de criar no Telegram.
+   * Envie "/start" para ele.
+   * Isso e necessario para que o bot possa enviar mensagens para voce.
+
+3. Configurar no TBH Picker:
+   * Abra "run_peeker_gui.bat".
+   * Va em "Targets & Alerts" > "Notifications".
+   * Marque "Enable Telegram Notifications".
+   * Cole o token inteiro no campo "Telegram BotFather Token".
+   * Clique em "Detect Chat ID". O app vai buscar a conversa recente com o bot e preencher o Chat ID automaticamente.
+   * Clique em "Send Telegram Test" para confirmar que a mensagem chega no Telegram.
+
+4. Usar com os alertas:
+   * Depois de configurado, qualquer item que disparar alerta no painel tambem enviara mensagem no Telegram.
+   * A mensagem inclui o nome completo do item, ID e raridade.
+   * Se voce trocar/revogar o token no BotFather, atualize o campo "Telegram BotFather Token" no app.
+
+Notas importantes:
+- Nao compartilhe publicamente o token do bot. Quem tem esse token pode controlar o bot.
+- O Chat ID e diferente do token. O token normalmente tem dois-pontos (:). O Chat ID normalmente e um numero.
+- Para grupos, adicione o bot ao grupo, envie uma mensagem no grupo e use "Detect Chat ID" novamente.
+
 Dica para Envio aos Amigos:
 - Certifique-se de enviar a pasta contendo o arquivo "id_to_sprite.json", pois ele já contém o mapeamento de ícones de todos os 5.875 itens do jogo para carregar as imagens instantaneamente.
 - A pasta "cache_sprites" também pode ser enviada para que eles não precisem baixar as imagens do site oficial no primeiro uso, mas caso ela não seja enviada, o aplicativo fará o download das sprites automaticamente sob demanda.
