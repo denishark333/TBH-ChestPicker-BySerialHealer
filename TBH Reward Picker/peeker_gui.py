@@ -1,5 +1,4 @@
 from __future__ import annotations
- 
 import json
 import os
 import re
@@ -12,22 +11,18 @@ import warnings
 import ctypes
 from pathlib import Path
 from typing import Any
- 
 # Silence deprecation and user warnings to keep the console clean
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
- 
 import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image
- 
 # Import winsound on Windows for alerts
 try:
     import winsound
 except ImportError:
     winsound = None
- 
 # =====================================================================
 # Constants & Colors (Matching tbh_reward_hook.py style)
 # =====================================================================
@@ -41,7 +36,6 @@ COLOR_TEXT = "#e8e8e8"        # Light text for the dashboard
 COLOR_MUTED = "#b8b8b8"       # Softer muted text
 COLOR_ENTRY_BG = "#111111"    # Dark entry background
 COLOR_BORDER = "#2f2f2f"      # Soft border color
- 
 GRADE_COLORS = {
     "COMMON": "#e4e4e4",
     "UNCOMMON": "#54fc0c",
@@ -56,33 +50,27 @@ GRADE_COLORS = {
     "BOSS": "#00a8ff",          # Bright blue/cyan for Stage Boss Box
     "SOULSTONE": "#e74c3c"      # Red/crimson for Soulstone card
 }
- 
 ROOT = Path(__file__).resolve().parent
 PEEKER_CONFIG_PATH = ROOT / "peeker_config.json"
 ITEMS_PATH = ROOT / "items.json"
 ADDON_PATH = ROOT / "chest_peeker.py"
- 
 # Windows POINT structure for mouse positioning
 class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
- 
 # =====================================================================
 # GUI Application Class
 # =====================================================================
 class PeekerGUI(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
- 
         self.title("TBH Picker - Auto Relogger")
         self.geometry("1100x780")
         self.minsize(960, 640)
         self.configure(fg_color=COLOR_BG)
         ctk.set_appearance_mode("dark")
- 
         # Load Items database
         self.items_db: list[dict[str, Any]] = []
         self.load_items_db()
- 
         # State configurations
         self.coords = {
             "menu": None,
@@ -107,7 +95,47 @@ class PeekerGUI(ctk.CTk):
         self.trainer_auto_launch = False
         self.trainer_path = str(ROOT / "TBH Trainer.exe")
         self.relog_safety_delay = 45  # seconds to wait after collecting item before relogging (anti-rollback)
-        self.max_chest_index = 43  # default max chest index to match grade filters
+        self.max_chest_index = 43
+        self.save_file_path = ""
+        self.last_save_mtime = 0
+        self.last_save_use_list_len = -1
+        self.running = True
+        default_save = os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\TesseractStudio\TaskbarHero\SaveFile_Live.es3")
+        self.save_file_path = default_save
+        self.seen_get_chest_ids = set()
+        self.seen_use_chest_ids = set()
+        self.chest_id_to_drop_map = {}
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.unified_timeline = []
+        self.initial_use_list = None
+        self.collected_run_cids = set()
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.seen_use_chest_ids = set()
+        self.chest_id_to_drop_map = {}
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.unified_timeline = []
+        self.initial_use_list = None
+        self.collected_run_cids = set()
+        self.seen_inventory_item_ids = set()
+        self.stageboss_chest_queue = []
+        self.normal_chest_queue = []
+        self.stageboss_progress_widgets = []
+        self.normal_progress_widgets = []
+        self.stageboss_chest_dropped_this_run = False
+        self.seen_use_chest_ids = set()
+        self.chest_id_to_drop_map = {}
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.unified_timeline = []
+        self.initial_use_list = None
+        self.collected_run_cids = set()
         self.rare_chest_cooldown = 420  # StageBoss chest cooldown (s)
         self.uncommon_chest_cooldown = 240  # Normal chest cooldown (s)
         self.dashboard_scans_done = 0
@@ -118,7 +146,6 @@ class PeekerGUI(ctk.CTk):
         self.load_peeker_config()
         self.market_price_cache = {}
         self.load_market_cache()
- 
         # Execution state
         self.proxy_process: subprocess.Popen | None = None
         self.proxy_running = False
@@ -133,18 +160,15 @@ class PeekerGUI(ctk.CTk):
         self.current_chest_queue = []
         self.target_chest_index = None
         self.load_or_build_sprite_mapping()
-        
         # Build UI
         self.create_widgets()
-        
         # Bind close protocol handler
         self.protocol("WM_DELETE_WINDOW", self.on_closing)
-        
         # Start state check loop (hotkeys and logs)
         self.after(50, self.check_hotkeys)
         self.after(100, self.start_proxy) # Auto-start proxy on startup!
+        self.after(200, self.start_save_watcher)
         self.append_log("[INFO] Peeker GUI loaded. Ready.\n")
- 
     # =====================================================================
     # Config & Database Loading
     # =====================================================================
@@ -155,7 +179,6 @@ class PeekerGUI(ctk.CTk):
                     self.items_db = json.load(f)
             except Exception as e:
                 print(f"Error loading items.json: {e}")
-        
     def load_peeker_config(self) -> None:
         if PEEKER_CONFIG_PATH.exists():
             try:
@@ -176,9 +199,9 @@ class PeekerGUI(ctk.CTk):
                 self.max_chest_index = data.get("max_chest_index", 43)
                 self.rare_chest_cooldown = data.get("rare_chest_cooldown", 420)
                 self.uncommon_chest_cooldown = data.get("uncommon_chest_cooldown", 240)
+                self.save_file_path = data.get("save_file_path", self.save_file_path)
             except Exception:
                 pass
- 
     def save_peeker_config(self) -> None:
         try:
             data = {
@@ -197,12 +220,12 @@ class PeekerGUI(ctk.CTk):
                 "relog_safety_delay": self.relog_safety_delay,
                 "max_chest_index": self.max_chest_index,
                 "rare_chest_cooldown": self.rare_chest_cooldown,
-                "uncommon_chest_cooldown": self.uncommon_chest_cooldown
+                "uncommon_chest_cooldown": self.uncommon_chest_cooldown,
+                "save_file_path": self.save_file_path
             }
             PEEKER_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
         except Exception as e:
             self.append_log(f"[ERROR] Failed to save config: {e}\n")
-
     def load_market_cache(self) -> None:
         """Carrega o cache de preços do arquivo local."""
         self.market_price_cache = {}
@@ -213,7 +236,6 @@ class PeekerGUI(ctk.CTk):
                     self.market_price_cache = json.load(f)
             except Exception:
                 pass
-
     def save_market_cache(self) -> None:
         """Salva o cache de preços no arquivo local."""
         cache_path = ROOT / "market_cache.json"
@@ -222,34 +244,28 @@ class PeekerGUI(ctk.CTk):
                 json.dump(self.market_price_cache, f, indent=2)
         except Exception:
             pass
-
     def fetch_steam_market_price(self, item_name: str, callback) -> None:
         """Busca o preço do item, respeitando o cooldown incondicional de 12 horas."""
         now = time.time()
         max_cache_age = 12 * 3600  # 12 horas em segundos
-        
         # Se o item já foi consultado (com sucesso, erro ou indisponível) dentro de 12h, 
         # usa a resposta do cache de forma incondicional.
         if item_name in self.market_price_cache:
             item_data = self.market_price_cache[item_name]
             cached_time = item_data.get("timestamp", 0)
             cached_price = item_data.get("price", "N/A")
-            
             if now - cached_time < max_cache_age:
                 callback(cached_price)
                 return
-
         # Caso contrário, dispara a thread para consultar a Steam
         def worker():
             import urllib.request
             import urllib.parse
             import json
-            
             price_str = "N/A"
             try:
                 encoded_name = urllib.parse.quote(item_name)
                 url = f"https://steamcommunity.com/market/priceoverview/?appid=3678970&currency=7&market_hash_name={encoded_name}"
-                
                 req = urllib.request.Request(
                     url,
                     headers={
@@ -262,18 +278,14 @@ class PeekerGUI(ctk.CTk):
                         price_str = data.get("lowest_price", data.get("median_price", "N/A"))
             except Exception:
                 price_str = "N/A"
-            
             # Salva o resultado (preço real ou N/A) no cache com o timestamp atual
             self.market_price_cache[item_name] = {
                 "price": price_str,
                 "timestamp": now
             }
             self.save_market_cache()
-            
             self.after(0, lambda: callback(price_str))
-
         threading.Thread(target=worker, daemon=True).start()
- 
     # =====================================================================
     # UI Layout & Construction
     # =====================================================================
@@ -286,7 +298,6 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_PRIMARY
         )
         self.title_label.pack(pady=(20, 2), padx=20, anchor="w")
- 
         self.subtitle_label = ctk.CTkLabel(
             self,
             text="Peeks at stage rewards and automates re-entry until target items are found.",
@@ -294,21 +305,17 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_MUTED
         )
         self.subtitle_label.pack(pady=(0, 15), padx=20, anchor="w")
- 
         self.main_container = ctk.CTkFrame(self, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True, padx=20, pady=(0, 10))
         self.main_container.grid_columnconfigure(0, weight=1)
         self.main_container.grid_rowconfigure(0, weight=1)
-
         self.sidebar = ctk.CTkFrame(self.main_container, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1, width=220)
         self.sidebar.pack(side="left", fill="y", padx=(0, 12))
         self.sidebar.pack_propagate(False)
-
         self.sidebar_title = ctk.CTkLabel(self.sidebar, text="Navigation", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         self.sidebar_title.pack(anchor="w", padx=16, pady=(16, 12))
-
         self.sidebar_buttons = {}
-        for name in ["Dashboard", "Targets & Alerts", "Settings", "Console Log"]:
+        for name in ["Dashboard", "Targets & Alerts", "Loot Progress", "Save File", "Settings", "Console Log"]:
             btn = ctk.CTkButton(
                 self.sidebar,
                 text=name,
@@ -321,48 +328,43 @@ class PeekerGUI(ctk.CTk):
             )
             btn.pack(fill="x", padx=12, pady=(0, 8))
             self.sidebar_buttons[name] = btn
-
         self.content_area = ctk.CTkFrame(self.main_container, fg_color="transparent")
         self.content_area.pack(side="left", fill="both", expand=True)
-
         self.tab_frames = {}
         self.tab_dashboard = ctk.CTkFrame(self.content_area, fg_color="transparent")
         self.tab_targets = ctk.CTkFrame(self.content_area, fg_color="transparent")
         self.tab_settings = ctk.CTkFrame(self.content_area, fg_color="transparent")
         self.tab_console = ctk.CTkFrame(self.content_area, fg_color="transparent")
-
         self.tab_frames["Dashboard"] = self.tab_dashboard
         self.tab_frames["Targets & Alerts"] = self.tab_targets
+        self.tab_save = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        self.tab_frames["Save File"] = self.tab_save
+        self.tab_loot_progress = ctk.CTkFrame(self.content_area, fg_color="transparent")
+        self.tab_frames["Loot Progress"] = self.tab_loot_progress
         self.tab_frames["Settings"] = self.tab_settings
         self.tab_frames["Console Log"] = self.tab_console
-
         for frame in self.tab_frames.values():
             frame.pack(fill="both", expand=True)
             frame.pack_forget()
-
         # Proxy Controller inside Sidebar (at the bottom)
         self.proxy_frame = ctk.CTkFrame(self.sidebar, fg_color=COLOR_SECONDARY, border_color=COLOR_BORDER, border_width=1)
         self.proxy_frame.pack(side="bottom", fill="x", padx=12, pady=12)
-        
         lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT)
         lbl.pack(anchor="w", padx=10, pady=(6, 8))
-        
         self.btn_proxy = ctk.CTkButton(self.proxy_frame, text="Start Peeker Proxy", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=11, weight="bold"), command=self.toggle_proxy, height=32)
         self.btn_proxy.pack(fill="x", padx=10, pady=(0, 6))
-        
         self.btn_trust_cert = ctk.CTkButton(self.proxy_frame, text="Trust CA Certificate", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(size=10, weight="bold"), command=self.install_cert_automatically, height=24)
         self.btn_trust_cert.pack(fill="x", padx=10, pady=(0, 6))
-        
         self.lbl_proxy_status = ctk.CTkLabel(self.proxy_frame, text="Status: Stopped", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, slant="italic"))
         self.lbl_proxy_status.pack(anchor="w", padx=10, pady=(0, 6))
-
         self.build_dashboard_tab()
         self.build_targets_tab()
+        self.build_save_tab()
+        self.build_loot_progress_tab()
         self.build_settings_tab()
         self.build_console_tab()
         self.update_dashboard_stats()
         self.show_tab("Dashboard")
- 
     def build_dashboard_tab(self) -> None:
         self.dashboard_scroll = ctk.CTkScrollableFrame(
             self.tab_dashboard,
@@ -371,7 +373,6 @@ class PeekerGUI(ctk.CTk):
             scrollbar_button_hover_color=COLOR_HOVER
         )
         self.dashboard_scroll.pack(fill="both", expand=True, padx=12, pady=12)
-
         self.dashboard_content = ctk.CTkFrame(self.dashboard_scroll, fg_color="transparent")
         self.dashboard_content.pack(fill="both", expand=True)
         self.dashboard_content.grid_columnconfigure(0, weight=1)
@@ -380,33 +381,25 @@ class PeekerGUI(ctk.CTk):
         self.dashboard_content.grid_rowconfigure(1, weight=0)
         self.dashboard_content.grid_rowconfigure(2, weight=1)
         self.dashboard_content.grid_rowconfigure(3, weight=0)
-
         # Create placeholder PIL image and CTkImage to prevent layout shift
         self.placeholder_pil = Image.new("RGBA", (32, 32), (26, 26, 30, 255))
         self.placeholder_image = ctk.CTkImage(self.placeholder_pil, size=(32, 32))
-        
         self.placeholder_chest_pil = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         self.placeholder_chest_image = ctk.CTkImage(self.placeholder_chest_pil, size=(16, 16))
-
         # Alert banner with dynamic height and icon container
         self.alert_banner = ctk.CTkFrame(self.dashboard_content, fg_color="#121212", border_color=COLOR_PRIMARY, border_width=1, height=75)
         self.alert_banner.grid(row=0, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
         self.alert_banner.pack_propagate(False)
-        
         alert_content = ctk.CTkFrame(self.alert_banner, fg_color="transparent")
         alert_content.pack(expand=True, padx=20, pady=10)
-        
         self.lbl_alert_icon = ctk.CTkLabel(alert_content, text="", width=32, height=32, fg_color="#1a1a1e", corner_radius=4, image=self.placeholder_image)
         self.lbl_alert_icon.pack(side="left", padx=(0, 12))
         self.lbl_alert_icon._my_image_ref = self.placeholder_image
-        
         self.alert_banner_label = ctk.CTkLabel(alert_content, text="Alert: No active alerts.", font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_MUTED, wraplength=600, justify="left", anchor="w")
         self.alert_banner_label.pack(side="left", fill="both", expand=True)
-
         self.upcoming_banner = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1, height=265)
         self.upcoming_banner.grid(row=1, column=0, columnspan=2, sticky="nsew", pady=(0, 10))
         self.upcoming_banner.pack_propagate(False)
-        
         ctk.CTkLabel(self.upcoming_banner, text="Upcoming Important Drops", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=16, pady=(12, 8))
         self.upcoming_cards = ctk.CTkFrame(self.upcoming_banner, fg_color="transparent")
         self.upcoming_cards.pack(fill="both", expand=True, padx=12, pady=(0, 12))
@@ -415,7 +408,6 @@ class PeekerGUI(ctk.CTk):
         self.upcoming_cards.grid_columnconfigure(2, weight=1)
         self.upcoming_cards.grid_rowconfigure(0, weight=1, minsize=90)
         self.upcoming_cards.grid_rowconfigure(1, weight=1, minsize=90)
-
         self.upcoming_card_vars = {}
         self.upcoming_card_widgets = {}
         for idx, rarity in enumerate(["IMMORTAL", "LEGENDARY", "RARE", "BEYOND", "ARCANA", "SOULSTONE"]):
@@ -423,48 +415,36 @@ class PeekerGUI(ctk.CTk):
             card.grid(row=idx // 3, column=idx % 3, sticky="nsew", padx=6, pady=6)
             color = GRADE_COLORS.get(rarity, COLOR_PRIMARY)
             card.configure(border_color=color)
-            
             # Header
             ctk.CTkLabel(card, text=rarity, font=ctk.CTkFont(size=11, weight="bold"), text_color=color).pack(anchor="w", padx=10, pady=(6, 2))
-            
             # Horizontal layout container
             content_frame = ctk.CTkFrame(card, fg_color="transparent")
             content_frame.pack(fill="both", expand=True, padx=8, pady=(2, 6))
-            
             # Item Icon on the left
             lbl_item_icon = ctk.CTkLabel(content_frame, text="", width=32, height=32, fg_color="#1a1a1e", corner_radius=4, image=self.placeholder_image)
             lbl_item_icon.pack(side="left", padx=(0, 8), anchor="n")
             lbl_item_icon._my_image_ref = self.placeholder_image
-            
             # Details column on the right
             details_frame = ctk.CTkFrame(content_frame, fg_color="transparent")
             details_frame.pack(side="left", fill="both", expand=True)
-            
             # Sub-frame for name and price side-by-side
             name_price_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
             name_price_frame.pack(fill="x", anchor="w")
-
             lbl_name = ctk.CTkLabel(name_price_frame, text="No drop yet", font=ctk.CTkFont(family="Inter", size=15, weight="bold"), text_color=COLOR_TEXT, wraplength=120, justify="left", anchor="w")
             lbl_name.pack(side="left")
-
             lbl_price = ctk.CTkLabel(name_price_frame, text="", font=ctk.CTkFont(family="Inter", size=17, weight="bold"), text_color=COLOR_PRIMARY, justify="left", anchor="w")
             lbl_price.pack(side="left", padx=(6, 0))
-            
             # Chest info row (hidden by default)
             chest_frame = ctk.CTkFrame(details_frame, fg_color="transparent")
             chest_frame.pack(fill="x", anchor="w", pady=(2, 0))
             chest_frame.pack_forget()
-            
             lbl_from = ctk.CTkLabel(chest_frame, text="In: ", font=ctk.CTkFont(size=9), text_color=COLOR_MUTED, anchor="w")
             lbl_from.pack(side="left")
-            
             lbl_chest_icon = ctk.CTkLabel(chest_frame, text="", width=16, height=16, fg_color="transparent", image=self.placeholder_chest_image)
             lbl_chest_icon.pack(side="left", padx=(1, 4))
             lbl_chest_icon._my_image_ref = self.placeholder_chest_image
-            
             lbl_chest_name = ctk.CTkLabel(chest_frame, text="", font=ctk.CTkFont(size=9, slant="italic"), text_color=COLOR_MUTED, anchor="w")
             lbl_chest_name.pack(side="left", fill="x", expand=True)
-            
             # Save references
             self.upcoming_card_widgets[rarity] = {
                 "card": card,
@@ -476,7 +456,6 @@ class PeekerGUI(ctk.CTk):
                 "lbl_chest_icon": lbl_chest_icon,
                 "lbl_chest_name": lbl_chest_name
             }
-
         self.bot_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.bot_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(8, 0))
         lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
@@ -488,13 +467,11 @@ class PeekerGUI(ctk.CTk):
         self.btn_item_collected = ctk.CTkButton(self.bot_frame, text="✅ Item Collected → Relog Now", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=12, weight="bold"), command=self.skip_to_safety_relog, height=36)
         self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
         self.btn_item_collected.pack_forget()
-
         # Manual cooldown settings in Auto-Relogger Controls
         cooldowns_container = ctk.CTkFrame(self.bot_frame, fg_color="transparent")
-        cooldowns_container.pack(fill="x", padx=15, pady=(8, 4))
+        # cooldowns_container.pack(fill="x", padx=15, pady=(8, 4)) # Hidden to clean UI, using internal defaults
         cooldowns_container.grid_columnconfigure(0, weight=1)
         cooldowns_container.grid_columnconfigure(1, weight=1)
-        
         # StageBoss (Rare) Cooldown
         rare_col = ctk.CTkFrame(cooldowns_container, fg_color="transparent")
         rare_col.grid(row=0, column=0, padx=(0, 4), sticky="ew")
@@ -503,7 +480,6 @@ class PeekerGUI(ctk.CTk):
         self.entry_rare_cooldown.pack(fill="x", pady=(2, 0))
         self.entry_rare_cooldown.insert(0, str(self.rare_chest_cooldown))
         self.entry_rare_cooldown.bind("<KeyRelease>", self.on_rare_cooldown_typed)
-        
         # Normal (Uncommon) Cooldown
         uncommon_col = ctk.CTkFrame(cooldowns_container, fg_color="transparent")
         uncommon_col.grid(row=0, column=1, padx=(4, 0), sticky="ew")
@@ -512,25 +488,20 @@ class PeekerGUI(ctk.CTk):
         self.entry_uncommon_cooldown.pack(fill="x", pady=(2, 0))
         self.entry_uncommon_cooldown.insert(0, str(self.uncommon_chest_cooldown))
         self.entry_uncommon_cooldown.bind("<KeyRelease>", self.on_uncommon_cooldown_typed)
-
         self.lbl_bot_status = ctk.CTkLabel(self.bot_frame, text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, weight="bold"), justify="left")
         self.lbl_bot_status.pack(anchor="w", padx=15, pady=(0, 8))
-
         self.telemetry_frame = ctk.CTkFrame(self.dashboard_content, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.telemetry_frame.grid(row=2, column=1, sticky="nsew", padx=(8, 0), pady=(8, 0))
         telemetry_title = ctk.CTkLabel(self.telemetry_frame, text="Session Telemetry", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         telemetry_title.pack(anchor="w", padx=15, pady=(10, 8))
-
         self.telemetry_grid = ctk.CTkFrame(self.telemetry_frame, fg_color="transparent")
         self.telemetry_grid.pack(fill="x", padx=15, pady=(0, 8))
         self.telemetry_grid.grid_columnconfigure(0, weight=1)
         self.telemetry_grid.grid_columnconfigure(1, weight=1)
-
         self.telemetry_scans_var = ctk.StringVar(value="0")
         self.telemetry_loots_var = ctk.StringVar(value="0")
         self.telemetry_targets_var = ctk.StringVar(value="0")
         self.telemetry_last_var = ctk.StringVar(value="Idle")
-
         self.telemetry_cards = []
         for idx, (label_text, var) in enumerate([("Scans", self.telemetry_scans_var), ("Loots", self.telemetry_loots_var), ("Targets", self.telemetry_targets_var), ("Last", self.telemetry_last_var)]):
             card = ctk.CTkFrame(self.telemetry_grid, fg_color="#181818", border_color=COLOR_BORDER, border_width=1)
@@ -538,31 +509,24 @@ class PeekerGUI(ctk.CTk):
             ctk.CTkLabel(card, text=label_text, font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED).pack(anchor="w", padx=10, pady=(8, 2))
             ctk.CTkLabel(card, textvariable=var, font=ctk.CTkFont(size=13, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=10, pady=(0, 8))
             self.telemetry_cards.append(card)
-
         self.next_drop_banner = ctk.CTkFrame(self.telemetry_frame, fg_color="#171717", border_color=COLOR_BORDER, border_width=1)
         self.next_drop_banner.pack(fill="x", padx=15, pady=(8, 12))
         ctk.CTkLabel(self.next_drop_banner, text="Next Valuable Drop", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT).pack(anchor="w", padx=10, pady=(8, 2))
-        
         # Horizontal container for Next Valuable Drop details to prevent layout shift
         next_drop_content = ctk.CTkFrame(self.next_drop_banner, fg_color="transparent")
         next_drop_content.pack(fill="x", padx=10, pady=(0, 10))
-        
         # Icon on the left
         self.lbl_next_drop_icon = ctk.CTkLabel(next_drop_content, text="", width=32, height=32, fg_color="#1a1a1e", corner_radius=4, image=self.placeholder_image)
         self.lbl_next_drop_icon.pack(side="left", padx=(0, 8), anchor="center")
         self.lbl_next_drop_icon._my_image_ref = self.placeholder_image
-        
         self.next_drop_var = ctk.StringVar(value="Waiting for scan...")
         self.lbl_next_drop = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_var, font=ctk.CTkFont(family="Inter", size=15, weight="bold"), text_color=COLOR_MUTED, wraplength=200, justify="left", anchor="w")
         self.lbl_next_drop.pack(side="left")
-        
         self.next_drop_price_var = ctk.StringVar(value="")
         self.lbl_next_drop_price = ctk.CTkLabel(next_drop_content, textvariable=self.next_drop_price_var, font=ctk.CTkFont(family="Inter", size=17, weight="bold"), text_color=COLOR_PRIMARY, justify="left", anchor="w")
         self.lbl_next_drop_price.pack(side="left", padx=(6, 0))
-
         footer = ctk.CTkLabel(self.dashboard_content, text="Powered by: SH", font=ctk.CTkFont(size=11), text_color=COLOR_MUTED)
         footer.grid(row=3, column=0, columnspan=2, sticky="s", pady=(12, 0))
-
     def build_targets_tab(self) -> None:
         self.targets_scroll = ctk.CTkScrollableFrame(
             self.tab_targets,
@@ -571,7 +535,6 @@ class PeekerGUI(ctk.CTk):
             scrollbar_button_hover_color=COLOR_HOVER
         )
         self.targets_scroll.pack(fill="both", expand=True, padx=12, pady=12)
-
         # Themed container frame for targets to match dashboard layout
         self.targets_container = ctk.CTkFrame(
             self.targets_scroll,
@@ -580,7 +543,6 @@ class PeekerGUI(ctk.CTk):
             border_width=1
         )
         self.targets_container.pack(fill="both", expand=True, padx=4, pady=4)
-
         # Title for the container
         lbl_title = ctk.CTkLabel(
             self.targets_container, 
@@ -589,7 +551,6 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_TEXT
         )
         lbl_title.pack(anchor="w", padx=16, pady=(12, 4))
-
         self.filter_tabview = ctk.CTkTabview(
             self.targets_container,
             fg_color="transparent",  # Make transparent so it uses container's COLOR_FRAME
@@ -600,15 +561,217 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_TEXT
         )
         self.filter_tabview.pack(fill="both", expand=True, padx=12, pady=(0, 12))
-
         self.tab_items = self.filter_tabview.add("Item Targets")
         self.tab_grades = self.filter_tabview.add("Grade Targets")
         self.tab_notifications = self.filter_tabview.add("Notifications")
-
         self.build_item_filters_tab()
         self.build_grade_filters_tab()
         self.build_notifications_tab()
-
+    def build_save_tab(self) -> None:
+        self.save_scroll = ctk.CTkScrollableFrame(
+            self.tab_save,
+            fg_color="transparent",
+            scrollbar_button_color=COLOR_PRIMARY,
+            scrollbar_button_hover_color=COLOR_HOVER
+        )
+        self.save_scroll.pack(fill="both", expand=True, padx=12, pady=12)
+        self.save_content = ctk.CTkFrame(self.save_scroll, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.save_content.pack(fill="x", padx=4, pady=4)
+        lbl_save_title = ctk.CTkLabel(
+            self.save_content,
+            text="TBH Save File Integration (Real-time Chest Tracker)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_save_title.pack(anchor="w", padx=15, pady=(10, 5))
+        lbl_save_desc = ctk.CTkLabel(
+            self.save_content,
+            text="Decrypts the local SaveFile_Live.es3 to monitor chest openings in real-time.",
+            font=ctk.CTkFont(size=11),
+            text_color=COLOR_MUTED
+        )
+        lbl_save_desc.pack(anchor="w", padx=15, pady=(0, 10))
+        lbl_copy_hint = ctk.CTkLabel(
+            self.save_content,
+            text="COPY TO PATHFILE (Click to copy):\n%USERPROFILE%\\AppData\\LocalLow\\TesseractStudio\\TaskbarHero\\SaveFile_Live.es3",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color="#f1c40f",
+            cursor="hand2",
+            justify="center"
+        )
+        lbl_copy_hint.pack(anchor="center", padx=15, pady=(5, 10))
+        def on_copy_click(event):
+            self.clipboard_clear()
+            self.clipboard_append(r"%USERPROFILE%\AppData\LocalLow\TesseractStudio\TaskbarHero\SaveFile_Live.es3")
+            self.update()
+            lbl_copy_hint.configure(text="✓ Copied to Clipboard!", text_color="#2ecc71")
+            self.after(2000, lambda: lbl_copy_hint.configure(
+                text="COPY TO PATHFILE (Click to copy):\n%USERPROFILE%\\AppData\\LocalLow\\TesseractStudio\\TaskbarHero\\SaveFile_Live.es3",
+                text_color="#f1c40f"
+            ))
+            self.append_log("[INFO] Path copied to clipboard.\n")
+        lbl_copy_hint.bind("<Button-1>", on_copy_click)
+        lbl_save_path = ctk.CTkLabel(
+            self.save_content,
+            text="SaveFile_Live.es3 Path:",
+            font=ctk.CTkFont(size=11, weight="bold"),
+            text_color=COLOR_MUTED
+        )
+        lbl_save_path.pack(anchor="w", padx=15, pady=(5, 2))
+        save_path_row = ctk.CTkFrame(self.save_content, fg_color="transparent")
+        save_path_row.pack(fill="x", padx=15, pady=(0, 15))
+        self.entry_save_path = ctk.CTkEntry(
+            save_path_row,
+            fg_color=COLOR_ENTRY_BG,
+            border_color=COLOR_BORDER,
+            text_color=COLOR_TEXT,
+            placeholder_text="Browse path to SaveFile_Live.es3...",
+            font=ctk.CTkFont(size=11)
+        )
+        self.entry_save_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.entry_save_path.insert(0, self.save_file_path)
+        self.entry_save_path.bind("<KeyRelease>", self.on_save_path_typed)
+        self.btn_browse_save = ctk.CTkButton(
+            save_path_row,
+            text="Browse",
+            fg_color=COLOR_PRIMARY,
+            hover_color=COLOR_HOVER,
+            text_color=COLOR_TEXT,
+            font=ctk.CTkFont(size=11, weight="bold"),
+            width=70,
+            command=self.browse_save_path
+        )
+        self.btn_browse_save.pack(side="right")
+    def build_loot_progress_tab(self) -> None:
+        self.loot_frame = ctk.CTkFrame(self.tab_loot_progress, fg_color="transparent")
+        self.loot_frame.pack(fill="both", expand=True, padx=12, pady=12)
+        
+        # Split layout: StageBoss on left, Normal on right
+        self.frame_sb_progress = ctk.CTkFrame(self.loot_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.frame_sb_progress.pack(side="left", fill="both", expand=True, padx=(0, 6))
+        
+        lbl_sb = ctk.CTkLabel(
+            self.frame_sb_progress,
+            text="StageBoss Chests (Raros)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLOR_PRIMARY
+        )
+        lbl_sb.pack(anchor="w", padx=15, pady=(10, 5))
+        
+        self.scroll_sb_progress = ctk.CTkScrollableFrame(
+            self.frame_sb_progress,
+            fg_color=COLOR_BG,
+            scrollbar_button_color=COLOR_PRIMARY,
+            scrollbar_button_hover_color=COLOR_HOVER
+        )
+        self.scroll_sb_progress.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        
+        self.frame_norm_progress = ctk.CTkFrame(self.loot_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.frame_norm_progress.pack(side="right", fill="both", expand=True, padx=(6, 0))
+        
+        lbl_norm = ctk.CTkLabel(
+            self.frame_norm_progress,
+            text="Normal Chests (Comuns)",
+            font=ctk.CTkFont(size=14, weight="bold"),
+            text_color=COLOR_TEXT
+        )
+        lbl_norm.pack(anchor="w", padx=15, pady=(10, 5))
+        
+        self.scroll_norm_progress = ctk.CTkScrollableFrame(
+            self.frame_norm_progress,
+            fg_color=COLOR_BG,
+            scrollbar_button_color=COLOR_PRIMARY,
+            scrollbar_button_hover_color=COLOR_HOVER
+        )
+        self.scroll_norm_progress.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+    def update_loot_progress_ui(self) -> None:
+        if not hasattr(self, 'scroll_sb_progress') or not self.scroll_sb_progress.winfo_exists():
+            return
+            
+        # Clear scrollables
+        for widget in self.scroll_sb_progress.winfo_children():
+            widget.destroy()
+        for widget in self.scroll_norm_progress.winfo_children():
+            widget.destroy()
+            
+        self.stageboss_progress_widgets.clear()
+        self.normal_progress_widgets.clear()
+        
+        # Populate StageBoss
+        for idx, item in enumerate(self.stageboss_chest_queue):
+            item_id = item["item_id"]
+            is_unreachable = item.get("is_unreachable", False)
+            info = self.get_item_info_by_id(item_id)
+            name = self.get_item_name(info, f"Item ({item_id})")
+            grade = info.get("grade", "COMMON")
+            color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
+            
+            card = ctk.CTkFrame(
+                self.scroll_sb_progress, 
+                fg_color=COLOR_FRAME if not is_unreachable else "#151518", 
+                border_color=COLOR_BORDER if not is_unreachable else "#252528", 
+                border_width=1, 
+                height=36
+            )
+            card.pack(fill="x", padx=6, pady=3)
+            card.pack_propagate(False)
+            
+            lbl_status = ctk.CTkLabel(card, text="[  ]", font=ctk.CTkFont(family="Consolas", size=12, weight="bold"), text_color=COLOR_MUTED)
+            lbl_status.pack(side="left", padx=10)
+            
+            lbl_idx = ctk.CTkLabel(card, text=f"#{idx+1}", font=ctk.CTkFont(family="Consolas", size=11), text_color=COLOR_MUTED)
+            lbl_idx.pack(side="left", padx=(0, 10))
+            
+            if is_unreachable:
+                lbl_unreach = ctk.CTkLabel(card, text="[⚠️ UNREACHABLE]", font=ctk.CTkFont(size=10, weight="bold"), text_color="#e74c3c")
+                lbl_unreach.pack(side="right", padx=10)
+                
+            lbl_name = ctk.CTkLabel(
+                card, 
+                text=name, 
+                font=ctk.CTkFont(size=12, weight="bold"), 
+                text_color=color if not is_unreachable else COLOR_MUTED
+            )
+            lbl_name.pack(side="left", fill="x", expand=True, anchor="w")
+            
+            self.stageboss_progress_widgets.append({
+                "card": card,
+                "lbl_status": lbl_status,
+                "lbl_name": lbl_name,
+                "name": name,
+                "id": item_id,
+                "color": color
+            })
+            
+        # Populate Normal
+        for idx, item in enumerate(self.normal_chest_queue):
+            item_id = item["item_id"]
+            info = self.get_item_info_by_id(item_id)
+            name = self.get_item_name(info, f"Item ({item_id})")
+            grade = info.get("grade", "COMMON")
+            color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
+            
+            card = ctk.CTkFrame(self.scroll_norm_progress, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1, height=36)
+            card.pack(fill="x", padx=6, pady=3)
+            card.pack_propagate(False)
+            
+            lbl_status = ctk.CTkLabel(card, text="[  ]", font=ctk.CTkFont(family="Consolas", size=12, weight="bold"), text_color=COLOR_MUTED)
+            lbl_status.pack(side="left", padx=10)
+            
+            lbl_idx = ctk.CTkLabel(card, text=f"#{idx+1}", font=ctk.CTkFont(family="Consolas", size=11), text_color=COLOR_MUTED)
+            lbl_idx.pack(side="left", padx=(0, 10))
+            
+            lbl_name = ctk.CTkLabel(card, text=name, font=ctk.CTkFont(size=12, weight="bold"), text_color=color)
+            lbl_name.pack(side="left", fill="x", expand=True, anchor="w")
+            
+            self.normal_progress_widgets.append({
+                "card": card,
+                "lbl_status": lbl_status,
+                "lbl_name": lbl_name,
+                "name": name,
+                "id": item_id,
+                "color": color
+            })
     def build_settings_tab(self) -> None:
         self.settings_scroll = ctk.CTkScrollableFrame(
             self.tab_settings,
@@ -617,28 +780,14 @@ class PeekerGUI(ctk.CTk):
             scrollbar_button_hover_color=COLOR_HOVER
         )
         self.settings_scroll.pack(fill="both", expand=True, padx=12, pady=12)
-
         self.calib_frame = ctk.CTkFrame(self.settings_scroll, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.calib_frame.pack(fill="both", expand=True, padx=4, pady=4)
-
         lbl_cal = ctk.CTkLabel(self.calib_frame, text="Auto-Relogger Setup", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl_cal.pack(anchor="w", padx=15, pady=(8, 5))
-
-        self.relogger_method_var = ctk.StringVar(value="Process Restart" if self.relogger_method == "process_restart" else "Mouse Clicks")
-        self.seg_method = ctk.CTkSegmentedButton(
-            self.calib_frame,
-            values=["Process Restart", "Mouse Clicks"],
-            variable=self.relogger_method_var,
-            command=self.on_relogger_method_changed,
-            selected_color=COLOR_PRIMARY,
-            selected_hover_color=COLOR_HOVER,
-            unselected_color=COLOR_SECONDARY,
-            unselected_hover_color=COLOR_SEC_HOVER,
-            text_color=COLOR_TEXT
-        )
-        self.seg_method.pack(fill="x", padx=15, pady=5)
-
+        self.relogger_method_var = ctk.StringVar(value="Process Restart")
+        self.relogger_method = "process_restart"
         self.restart_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
+        self.restart_container.pack(fill="x", padx=15, pady=5)
         lbl_path = ctk.CTkLabel(self.restart_container, text="TaskbarHero.exe Path:", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
         lbl_path.pack(anchor="w", padx=0, pady=(5, 2))
         path_row = ctk.CTkFrame(self.restart_container, fg_color="transparent")
@@ -663,35 +812,7 @@ class PeekerGUI(ctk.CTk):
             command=self.browse_game_path
         )
         self.btn_browse.pack(side="right")
-
-        self.clicks_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
-        lbl_inst = ctk.CTkLabel(
-            self.clicks_container,
-            text="Click a button below, hover over the game item, then press F8 to save.",
-            font=ctk.CTkFont(size=10, slant="italic"),
-            text_color=COLOR_MUTED,
-            wraplength=350,
-            justify="left"
-        )
-        lbl_inst.pack(anchor="w", padx=0, pady=(0, 5))
-
-        grid = ctk.CTkFrame(self.clicks_container, fg_color="transparent")
-        grid.pack(fill="x", pady=2)
-        grid.grid_columnconfigure(0, weight=1)
-        grid.grid_columnconfigure(1, weight=1)
-
-        self.btn_cal_menu = ctk.CTkButton(grid, text="1. Menu Button", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("menu"), height=26)
-        self.btn_cal_menu.grid(row=0, column=0, padx=(0, 3), pady=2, sticky="ew")
-        self.btn_cal_exit = ctk.CTkButton(grid, text="2. Back to Title", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("exit"), height=26)
-        self.btn_cal_exit.grid(row=0, column=1, padx=(3, 0), pady=2, sticky="ew")
-        self.btn_cal_stage = ctk.CTkButton(grid, text="3. Tap to Start", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("stage_icon"), height=26)
-        self.btn_cal_stage.grid(row=1, column=0, padx=(0, 3), pady=2, sticky="ew")
-        self.btn_cal_confirm = ctk.CTkButton(grid, text="4. Enter Stage", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER, command=lambda: self.start_calibration("confirm_enter"), height=26)
-        self.btn_cal_confirm.grid(row=1, column=1, padx=(3, 0), pady=2, sticky="ew")
-
-        self.lbl_cal_status = ctk.CTkLabel(self.clicks_container, text="", font=ctk.CTkFont(size=10), text_color=COLOR_MUTED, wraplength=350, justify="left")
-        self.lbl_cal_status.pack(anchor="w", padx=0, pady=(2, 2))
-
+        self.clicks_container = None
         delay_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
         delay_row.pack(fill="x", padx=15, pady=(5, 5))
         lbl_delay = ctk.CTkLabel(delay_row, text="Pause Delay (seconds):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
@@ -700,7 +821,6 @@ class PeekerGUI(ctk.CTk):
         self.entry_pause_delay.pack(side="left")
         self.entry_pause_delay.insert(0, str(self.pause_duration))
         self.entry_pause_delay.bind("<KeyRelease>", self.on_pause_delay_typed)
-
         safety_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
         safety_row.pack(fill="x", padx=15, pady=(2, 5))
         lbl_safety = ctk.CTkLabel(safety_row, text="Anti-Rollback Delay (s):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
@@ -709,7 +829,6 @@ class PeekerGUI(ctk.CTk):
         self.entry_safety_delay.pack(side="left")
         self.entry_safety_delay.insert(0, str(self.relog_safety_delay))
         self.entry_safety_delay.bind("<KeyRelease>", self.on_safety_delay_typed)
-
         max_idx_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
         max_idx_row.pack(fill="x", padx=15, pady=(2, 5))
         lbl_max_idx = ctk.CTkLabel(max_idx_row, text="Max Chest Index (Grade Match):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
@@ -718,22 +837,16 @@ class PeekerGUI(ctk.CTk):
         self.entry_max_chest_index.pack(side="left")
         self.entry_max_chest_index.insert(0, str(self.max_chest_index))
         self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
-
         self.update_relogger_ui_visibility()
-
     def build_console_tab(self) -> None:
         self.console_frame = ctk.CTkFrame(self.tab_console, fg_color="transparent")
         self.console_frame.pack(fill="both", expand=True, padx=12, pady=12)
-
         self.feed_frame = ctk.CTkFrame(self.console_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.feed_frame.pack(fill="both", expand=True)
-
         lbl = ctk.CTkLabel(self.feed_frame, text="Live Peek Feed", font=ctk.CTkFont(size=16, weight="bold"), text_color=COLOR_TEXT)
         lbl.pack(anchor="w", padx=15, pady=(10, 5))
-
         log_container = ctk.CTkFrame(self.feed_frame, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1)
         log_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
-
         self.txt_log = tk.Text(
             log_container,
             bg=COLOR_BG,
@@ -746,11 +859,9 @@ class PeekerGUI(ctk.CTk):
             font=("Consolas", 9)
         )
         self.txt_log.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
-
         scrollbar = ctk.CTkScrollbar(log_container, command=self.txt_log.yview, button_color=COLOR_PRIMARY, button_hover_color=COLOR_HOVER)
         scrollbar.pack(side="right", fill="y", padx=(5, 5), pady=10)
         self.txt_log.configure(yscrollcommand=scrollbar.set)
-
     def update_dashboard_stats(self) -> None:
         if hasattr(self, "telemetry_scans_var"):
             self.telemetry_scans_var.set(str(self.dashboard_scans_done))
@@ -760,7 +871,6 @@ class PeekerGUI(ctk.CTk):
             self.telemetry_targets_var.set(str(self.dashboard_targets_found))
         if hasattr(self, "telemetry_last_var"):
             self.telemetry_last_var.set(self.dashboard_last_activity)
-
     def set_dashboard_alert(self, message: str, severity: str = "info") -> None:
         if not hasattr(self, "alert_banner_label"):
             return
@@ -778,7 +888,6 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 pass
             self.lbl_alert_icon._my_image_ref = self.placeholder_image
-
     def update_dashboard_alert(self, item_name: str, grade: str | None = None, rarity_color: str | None = None, item_id: int | None = None) -> None:
         if not hasattr(self, "alert_banner") or not hasattr(self, "alert_banner_label"):
             return
@@ -795,7 +904,6 @@ class PeekerGUI(ctk.CTk):
                 except Exception:
                     pass
                 self.lbl_alert_icon._my_image_ref = self.placeholder_image
-
     def load_or_build_sprite_mapping(self) -> None:
         """Loads the ID-to-sprite mapping from a local JSON file or builds it in a background thread."""
         mapping_path = ROOT / "id_to_sprite.json"
@@ -806,7 +914,6 @@ class PeekerGUI(ctk.CTk):
                 return
             except Exception:
                 pass
-
         # If not found or failed, build it in a background thread
         def build_thread():
             try:
@@ -818,11 +925,9 @@ class PeekerGUI(ctk.CTk):
                 )
                 with urllib.request.urlopen(req, timeout=15) as response:
                     html = response.read().decode('utf-8')
-                
                 chunks = re.split(r'\\\"id\\\"\s*:\s*', html)
                 if len(chunks) <= 1:
                     chunks = re.split(r'\"id\"\s*:\s*', html)
-                
                 mapping = {}
                 for chunk in chunks[1:]:
                     id_match = re.match(r'^(\d+)', chunk)
@@ -834,7 +939,6 @@ class PeekerGUI(ctk.CTk):
                         if icon_match:
                             sprite_name = icon_match.group(1)
                             mapping[item_id] = sprite_name
-                
                 if mapping:
                     with open(mapping_path, "w", encoding="utf-8") as f:
                         json.dump(mapping, f, indent=4)
@@ -842,14 +946,11 @@ class PeekerGUI(ctk.CTk):
                     self.after(0, lambda: self.append_log(f"[SPRITES] Database mapping successfully built with {len(mapping)} items!\n"))
             except Exception as e:
                 self.after(0, lambda err=e: self.append_log(f"[WARNING] Failed to build sprite database: {err}\n"))
-
         threading.Thread(target=build_thread, daemon=True).start()
-
     def get_sprite_name(self, item_id: int) -> str:
         s_id = str(item_id)
         if hasattr(self, "sprite_mapping") and s_id in self.sprite_mapping:
             return self.sprite_mapping[s_id]
-
         if s_id.startswith('910'):
             return "Item_910011.png"
         elif s_id.startswith('920'):
@@ -857,7 +958,6 @@ class PeekerGUI(ctk.CTk):
         elif s_id.startswith('930'):
             return "Item_930011.png"
         return f"Item_{item_id}.png"
-
     def set_widget_image(self, widget: ctk.CTkLabel, pil_img: Image.Image, size: tuple[int, int]) -> None:
         """Safely creates a CTkImage in the main thread and configures the widget, storing a reference."""
         try:
@@ -866,14 +966,12 @@ class PeekerGUI(ctk.CTk):
             widget._my_image_ref = ctk_img
         except Exception as e:
             self.append_log(f"[WARNING] Failed to set widget image: {e}\n")
-
     def get_sprite_image(self, item_id: int, callback = None) -> None:
         """Asynchronously loads an item sprite from tbh.city or local cache and returns a PIL Image."""
         sprite_name = self.get_sprite_name(item_id)
         cache_dir = ROOT / "cache_sprites"
         cache_dir.mkdir(exist_ok=True)
         local_path = cache_dir / sprite_name
-        
         # 1. If it exists in cache, load immediately
         if local_path.exists():
             try:
@@ -887,7 +985,6 @@ class PeekerGUI(ctk.CTk):
                     local_path.unlink()
                 except Exception:
                     pass
-
         # 2. Download from tbh.city in a background thread
         def download_thread():
             url = f"https://tbh.city/sprites/sharedassets0/{sprite_name}"
@@ -899,38 +996,30 @@ class PeekerGUI(ctk.CTk):
                 )
                 with urllib.request.urlopen(req, timeout=8) as response:
                     data = response.read()
-                
                 local_path.write_bytes(data)
-                
                 pil_img = Image.open(local_path)
                 pil_img.load()  # Load data into memory before switching threads
                 if callback:
                     self.after(0, lambda: callback(pil_img))
             except Exception:
                 pass
-
         threading.Thread(target=download_thread, daemon=True).start()
-
     def update_upcoming_drops(self, all_item_ids: list[int] | None = None, triggered_item_id: int | None = None, chest_ids: list[int | None] | None = None) -> None:
         """Update the Upcoming Important Drops cards with items from the current roll.
-        
         Extracts important items from the roll that match the tracked rarities (IMMORTAL, LEGENDARY, RARE, BEYOND, ARCANA).
         Also displays the highest-grade Soulstone in the SOULSTONE card with its count.
         """
         if not hasattr(self, "upcoming_card_widgets"):
             return
-        
         try:
             # Reset all cards to "No drop yet" to ensure dynamism
             for rarity, widgets in self.upcoming_card_widgets.items():
                 widgets["lbl_name"].configure(text="No drop yet")
                 if "lbl_price" in widgets:
                     widgets["lbl_price"].configure(text="")
-                
                 # Reset card border color
                 color = GRADE_COLORS.get(rarity, COLOR_BORDER)
                 widgets["card"].configure(border_color=color)
-                
                 # Clear image from CTk widget and set to placeholder
                 widgets["lbl_item_icon"].configure(image=self.placeholder_image, text="")
                 # CRITICAL: Force clear the underlying standard Tkinter label's image reference
@@ -939,7 +1028,6 @@ class PeekerGUI(ctk.CTk):
                 except Exception:
                     pass
                 widgets["lbl_item_icon"]._my_image_ref = self.placeholder_image
-                
                 # Clear chest image from CTk widget and set to placeholder
                 widgets["lbl_chest_icon"].configure(image=self.placeholder_chest_image, text="")
                 # CRITICAL: Force clear the underlying standard Tkinter label's image reference
@@ -948,16 +1036,13 @@ class PeekerGUI(ctk.CTk):
                 except Exception:
                     pass
                 widgets["lbl_chest_icon"]._my_image_ref = self.placeholder_chest_image
-                
                 # Restore elements in chest frame
                 if "lbl_from" in widgets:
                     widgets["lbl_from"].pack(side="left")
                 if "lbl_chest_icon" in widgets:
                     widgets["lbl_chest_icon"].pack(side="left", padx=(1, 4))
                 widgets["lbl_chest_name"].configure(text="", font=ctk.CTkFont(size=9, slant="italic"), text_color=COLOR_MUTED)
-                
                 widgets["chest_frame"].pack_forget()
-
             if hasattr(self, "next_drop_var"):
                 self.next_drop_var.set("No valuable drops")
                 if hasattr(self, "next_drop_price_var"):
@@ -971,13 +1056,10 @@ class PeekerGUI(ctk.CTk):
                     except Exception:
                         pass
                     self.lbl_next_drop_icon._my_image_ref = self.placeholder_image
-
             if not all_item_ids:
                 return
-                
             if not chest_ids or len(chest_ids) != len(all_item_ids):
                 chest_ids = [None] * len(all_item_ids)
-            
             # Track which rarities have been filled (to avoid duplicates)
             filled_rarities = set()
             grade_values = {
@@ -985,32 +1067,26 @@ class PeekerGUI(ctk.CTk):
                 "BEYOND": 4, "IMMORTAL": 5, "ARCANA": 6, "CELESTIAL": 7,
                 "DIVINE": 8, "COSMIC": 9
             }
-            
             # 1. Process standard cards (excluding Soulstones)
             for item_id, chest_id in zip(all_item_ids, chest_ids):
                 info = self.get_item_info_by_id(item_id) or {}
                 grade = info.get("grade", "COMMON").upper()
                 name = self.get_item_name(info, "")
-                
                 # Check if it is a Soulstone
                 is_soulstone = "soulstone" in name.lower() or "soul stone" in name.lower()
-                
                 # Only process if this grade is one of our tracked rarities, not already filled, and not a soulstone
                 if grade in self.upcoming_card_widgets and grade not in filled_rarities and not is_soulstone:
                     # Update the card for this rarity
                     item_name = self.get_item_name(info, "Unknown")
                     widgets = self.upcoming_card_widgets[grade]
                     widgets["lbl_name"].configure(text=item_name)
-                    
                     # Fetch price in background and update card price label
                     if "lbl_price" in widgets:
                         def make_card_price_callback(w_price):
                             return lambda price: w_price.configure(text=f"|  {price}" if price and price != "N/A" else "|  N/A")
                         self.fetch_steam_market_price(item_name, make_card_price_callback(widgets["lbl_price"]))
-                    
                     # Fetch and load item sprite (main thread instantiation)
                     self.get_sprite_image(item_id, callback=lambda pil, w=widgets["lbl_item_icon"]: self.set_widget_image(w, pil, (32, 32)))
-                    
                     # If chest info is present, display chest sprite and name
                     if chest_id is not None:
                         c_info = self.get_item_info_by_id(chest_id) or {}
@@ -1018,14 +1094,11 @@ class PeekerGUI(ctk.CTk):
                         widgets["lbl_chest_name"].configure(text=c_name)
                         self.get_sprite_image(chest_id, callback=lambda pil, w=widgets["lbl_chest_icon"]: self.set_widget_image(w, pil, (16, 16)))
                         widgets["chest_frame"].pack(side="left", fill="x", anchor="w", pady=(2, 0))
-                    
                     filled_rarities.add(grade)
-
             # 2. Process Soulstone card (SOULSTONE)
             best_soulstone_id = None
             best_soulstone_info = None
             best_soulstone_val = -1
-            
             for item_id in all_item_ids:
                 info = self.get_item_info_by_id(item_id) or {}
                 name = self.get_item_name(info, "")
@@ -1036,28 +1109,22 @@ class PeekerGUI(ctk.CTk):
                         best_soulstone_val = val
                         best_soulstone_id = item_id
                         best_soulstone_info = info
-            
             if best_soulstone_id is not None and "SOULSTONE" in self.upcoming_card_widgets:
                 widgets = self.upcoming_card_widgets["SOULSTONE"]
                 grade = best_soulstone_info.get("grade", "COMMON").upper()
                 color = GRADE_COLORS.get(grade, "#e74c3c")
-                
                 # Update border color of the card to match soulstone rarity
                 widgets["card"].configure(border_color=color)
-                
                 # Update item name
                 widgets["lbl_name"].configure(text=self.get_item_name(best_soulstone_info, "Unknown"))
-                
                 # Fetch price in background and update card price label
                 if "lbl_price" in widgets:
                     s_name = self.get_item_name(best_soulstone_info, "Unknown")
                     def make_card_price_callback(w_price):
                         return lambda price: w_price.configure(text=f"|  {price}" if price and price != "N/A" else "|  N/A")
                     self.fetch_steam_market_price(s_name, make_card_price_callback(widgets["lbl_price"]))
-                
                 # Load item sprite (main thread instantiation)
                 self.get_sprite_image(best_soulstone_id, callback=lambda pil, w=widgets["lbl_item_icon"]: self.set_widget_image(w, pil, (32, 32)))
-                
                 # Show count
                 count = all_item_ids.count(best_soulstone_id)
                 if "lbl_from" in widgets:
@@ -1070,7 +1137,6 @@ class PeekerGUI(ctk.CTk):
                     text_color=color
                 )
                 widgets["chest_frame"].pack(side="left", fill="x", anchor="w", pady=(2, 0))
-
             # Update Next Valuable Drop banner based on the highest grade found in the current scan
             highest_grade_item = None
             highest_grade_val = -1
@@ -1084,7 +1150,6 @@ class PeekerGUI(ctk.CTk):
                 if val > highest_grade_val:
                     highest_grade_val = val
                     highest_grade_item = info
-
             if highest_grade_item and hasattr(self, "next_drop_var"):
                 name = self.get_item_name(highest_grade_item, "Unknown")
                 grade = highest_grade_item.get("grade", "COMMON")
@@ -1101,7 +1166,6 @@ class PeekerGUI(ctk.CTk):
                         self.next_drop_price_var.set(f"|  {price}")
                     else:
                         self.next_drop_price_var.set("|  N/A")
-                
                 self.fetch_steam_market_price(name, update_price_callback)
             elif hasattr(self, "next_drop_var"):
                 self.next_drop_var.set("No valuable drops")
@@ -1119,7 +1183,6 @@ class PeekerGUI(ctk.CTk):
         except Exception as e:
             import traceback
             self.append_log(f"\n[CRITICAL ERROR] Error in update_upcoming_drops: {e}\n{traceback.format_exc()}\n")
-
     def show_tab(self, name: str) -> None:
         for key, frame in self.tab_frames.items():
             frame.pack_forget()
@@ -1139,20 +1202,16 @@ class PeekerGUI(ctk.CTk):
                     border_color=COLOR_BORDER,
                     hover_color=COLOR_SECONDARY
                 )
-
     def build_left_panel(self) -> None:
         self.left_content_frame.grid_columnconfigure(0, weight=1)
         self.left_content_frame.grid_columnconfigure(1, weight=1)
         self.left_content_frame.grid_rowconfigure(0, weight=0)
         self.left_content_frame.grid_rowconfigure(1, weight=1, minsize=360)
-
         # 1. Proxy Controls Panel
         self.proxy_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.proxy_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
- 
         lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl.pack(anchor="w", padx=15, pady=(8, 10))
- 
         self.btn_proxy = ctk.CTkButton(
             self.proxy_frame,
             text="Start Peeker Proxy",
@@ -1164,7 +1223,6 @@ class PeekerGUI(ctk.CTk):
             height=36
         )
         self.btn_proxy.pack(fill="x", padx=15, pady=(0, 8))
- 
         self.btn_trust_cert = ctk.CTkButton(
             self.proxy_frame,
             text="Trust CA Certificate",
@@ -1175,7 +1233,6 @@ class PeekerGUI(ctk.CTk):
             command=self.install_cert_automatically,
             height=28
         )
- 
         self.lbl_proxy_status = ctk.CTkLabel(
             self.proxy_frame,
             text="Status: Stopped",
@@ -1184,39 +1241,21 @@ class PeekerGUI(ctk.CTk):
         )
         self.lbl_proxy_status.pack(anchor="w", padx=15, pady=(0, 4))
         self.btn_trust_cert.pack(fill="x", padx=15, pady=(0, 8))
- 
         # 2. Relogger Setup Panel
         self.calib_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.calib_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
- 
         lbl_cal = ctk.CTkLabel(self.calib_frame, text="Auto-Relogger Setup", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl_cal.pack(anchor="w", padx=15, pady=(8, 5))
- 
         # Relogger Method Selector
-        self.relogger_method_var = ctk.StringVar(value="Process Restart" if self.relogger_method == "process_restart" else "Mouse Clicks")
-        
-        self.seg_method = ctk.CTkSegmentedButton(
-            self.calib_frame,
-            values=["Process Restart", "Mouse Clicks"],
-            variable=self.relogger_method_var,
-            command=self.on_relogger_method_changed,
-            selected_color=COLOR_PRIMARY,
-            selected_hover_color=COLOR_HOVER,
-            unselected_color=COLOR_SECONDARY,
-            unselected_hover_color=COLOR_SEC_HOVER,
-            text_color=COLOR_TEXT
-        )
-        self.seg_method.pack(fill="x", padx=15, pady=5)
- 
+        self.relogger_method_var = ctk.StringVar(value="Process Restart")
+        self.relogger_method = "process_restart"
         # 2a. Process Restart UI Container
         self.restart_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
-        
+        self.restart_container.pack(fill="x", padx=15, pady=5)
         lbl_path = ctk.CTkLabel(self.restart_container, text="TaskbarHero.exe Path:", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
         lbl_path.pack(anchor="w", padx=0, pady=(5, 2))
-        
         path_row = ctk.CTkFrame(self.restart_container, fg_color="transparent")
         path_row.pack(fill="x")
-        
         self.entry_game_path = ctk.CTkEntry(
             path_row,
             fg_color=COLOR_ENTRY_BG,
@@ -1227,7 +1266,6 @@ class PeekerGUI(ctk.CTk):
         self.entry_game_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
         self.entry_game_path.insert(0, self.game_path)
         self.entry_game_path.bind("<KeyRelease>", self.on_game_path_typed)
-        
         self.btn_browse = ctk.CTkButton(
             path_row,
             text="Browse",
@@ -1238,69 +1276,15 @@ class PeekerGUI(ctk.CTk):
             command=self.browse_game_path
         )
         self.btn_browse.pack(side="right")
- 
         # 2b. Mouse Clicks UI Container
-        self.clicks_container = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
-        
-        lbl_inst = ctk.CTkLabel(
-            self.clicks_container,
-            text="Click a button below, hover over the game item, then press F8 to save.",
-            font=ctk.CTkFont(size=10, slant="italic"),
-            text_color=COLOR_MUTED,
-            wraplength=350,
-            justify="left"
-        )
-        lbl_inst.pack(anchor="w", padx=0, pady=(0, 5))
- 
-        grid = ctk.CTkFrame(self.clicks_container, fg_color="transparent")
-        grid.pack(fill="x", pady=2)
-        grid.grid_columnconfigure(0, weight=1)
-        grid.grid_columnconfigure(1, weight=1)
- 
-        self.btn_cal_menu = ctk.CTkButton(
-            grid, text="1. Menu Button", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
-            command=lambda: self.start_calibration("menu"), height=26
-        )
-        self.btn_cal_menu.grid(row=0, column=0, padx=(0, 3), pady=2, sticky="ew")
- 
-        self.btn_cal_exit = ctk.CTkButton(
-            grid, text="2. Back to Title", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
-            command=lambda: self.start_calibration("exit"), height=26
-        )
-        self.btn_cal_exit.grid(row=0, column=1, padx=(3, 0), pady=2, sticky="ew")
- 
-        self.btn_cal_stage = ctk.CTkButton(
-            grid, text="3. Tap to Start", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
-            command=lambda: self.start_calibration("stage_icon"), height=26
-        )
-        self.btn_cal_stage.grid(row=1, column=0, padx=(0, 3), pady=2, sticky="ew")
- 
-        self.btn_cal_confirm = ctk.CTkButton(
-            grid, text="4. Enter Stage", fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
-            command=lambda: self.start_calibration("confirm_enter"), height=26
-        )
-        self.btn_cal_confirm.grid(row=1, column=1, padx=(3, 0), pady=2, sticky="ew")
- 
-        self.lbl_cal_status = ctk.CTkLabel(
-            self.clicks_container,
-            text="",
-            font=ctk.CTkFont(size=10),
-            text_color=COLOR_MUTED,
-            wraplength=350,
-            justify="left"
-        )
-        self.lbl_cal_status.pack(anchor="w", padx=0, pady=(2, 2))
-        
-        # 2c. Pause Delay Input
+        self.clicks_container = None
         delay_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
         delay_row.pack(fill="x", padx=15, pady=(5, 5))
-        
         lbl_delay = ctk.CTkLabel(
             delay_row, text="Pause Delay (seconds):", 
             font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED
         )
         lbl_delay.pack(side="left", padx=(0, 10))
-        
         self.entry_pause_delay = ctk.CTkEntry(
             delay_row,
             width=60,
@@ -1312,17 +1296,14 @@ class PeekerGUI(ctk.CTk):
         self.entry_pause_delay.pack(side="left")
         self.entry_pause_delay.insert(0, str(self.pause_duration))
         self.entry_pause_delay.bind("<KeyRelease>", self.on_pause_delay_typed)
-        
         # 2d. Safety Delay Input (anti-rollback)
         safety_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
         safety_row.pack(fill="x", padx=15, pady=(2, 5))
-        
         lbl_safety = ctk.CTkLabel(
             safety_row, text="Anti-Rollback Delay (s):", 
             font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED
         )
         lbl_safety.pack(side="left", padx=(0, 10))
-        
         self.entry_safety_delay = ctk.CTkEntry(
             safety_row,
             width=60,
@@ -1334,17 +1315,14 @@ class PeekerGUI(ctk.CTk):
         self.entry_safety_delay.pack(side="left")
         self.entry_safety_delay.insert(0, str(self.relog_safety_delay))
         self.entry_safety_delay.bind("<KeyRelease>", self.on_safety_delay_typed)
-        
         # 2e. Max Chest Index Input
         max_idx_row = ctk.CTkFrame(self.calib_frame, fg_color="transparent")
         max_idx_row.pack(fill="x", padx=15, pady=(2, 5))
-        
         lbl_max_idx = ctk.CTkLabel(
             max_idx_row, text="Max Chest Index (Grade Match):", 
             font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED
         )
         lbl_max_idx.pack(side="left", padx=(0, 10))
-        
         self.entry_max_chest_index = ctk.CTkEntry(
             max_idx_row,
             width=60,
@@ -1356,18 +1334,14 @@ class PeekerGUI(ctk.CTk):
         self.entry_max_chest_index.pack(side="left")
         self.entry_max_chest_index.insert(0, str(self.max_chest_index))
         self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
-        
         # Show/Hide correct container initially
         self.update_relogger_ui_visibility()
- 
         # 3. Auto-Relogger Actions Frame
         self.bot_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.bot_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
         self.bot_frame.configure(height=360)
- 
         lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl_bot.pack(anchor="w", padx=15, pady=(8, 10))
- 
         self.btn_bot = ctk.CTkButton(
             self.bot_frame,
             text="Start Auto-Relogger",
@@ -1379,7 +1353,6 @@ class PeekerGUI(ctk.CTk):
             height=36
         )
         self.btn_bot.pack(fill="x", padx=15, pady=(0, 8))
- 
         self.btn_force_relaunch = ctk.CTkButton(
             self.bot_frame,
             text="Force Relaunch Game",
@@ -1391,7 +1364,6 @@ class PeekerGUI(ctk.CTk):
             height=36
         )
         self.btn_force_relaunch.pack(fill="x", padx=15, pady=(0, 8))
- 
         self.btn_item_collected = ctk.CTkButton(
             self.bot_frame,
             text="✅ Item Collected → Relog Now",
@@ -1405,7 +1377,6 @@ class PeekerGUI(ctk.CTk):
         # Hidden by default, shown when countdown is active
         self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8))
         self.btn_item_collected.pack_forget()
- 
         self.lbl_bot_status = ctk.CTkLabel(
             self.bot_frame,
             text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time",
@@ -1414,7 +1385,6 @@ class PeekerGUI(ctk.CTk):
             justify="left"
         )
         self.lbl_bot_status.pack(anchor="w", padx=15, pady=(0, 8))
- 
         # 4. Tabbed Filter Panel (Specific Items vs Grade Rarity)
         self.filter_tabview = ctk.CTkTabview(
             self.left_content_frame,
@@ -1428,15 +1398,12 @@ class PeekerGUI(ctk.CTk):
         self.filter_tabview.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
         self.filter_tabview.grid_propagate(False)
         self.filter_tabview.configure(height=360)
-        
         self.tab_items = self.filter_tabview.add("Item Targets")
         self.tab_grades = self.filter_tabview.add("Grade Targets")
         self.tab_notifications = self.filter_tabview.add("Notifications")
- 
         self.build_item_filters_tab()
         self.build_grade_filters_tab()
         self.build_notifications_tab()
- 
     def build_item_filters_tab(self) -> None:
         # Main content area for the tab, expanded to fill the full panel height
         scroll_frame = ctk.CTkFrame(
@@ -1445,23 +1412,19 @@ class PeekerGUI(ctk.CTk):
         )
         self.tab_items.configure(height=360)
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
-
         # Search box
         search_box = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         search_box.pack(fill="x", padx=5, pady=(5, 5))
-
         self.entry_search = ctk.CTkEntry(
             search_box, placeholder_text="Item Name (e.g. Dimensional)",
             fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT
         )
         self.entry_search.pack(side="left", fill="x", expand=True, padx=(0, 5))
-
         self.btn_search = ctk.CTkButton(
             search_box, text="Search", width=65, fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.search_items
         )
         self.btn_search.pack(side="right")
-
         # Search Results Selection Area
         self.combo_results = ctk.CTkComboBox(
             scroll_frame, values=["Search and select an item..."],
@@ -1469,62 +1432,51 @@ class PeekerGUI(ctk.CTk):
             dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
         )
         self.combo_results.pack(fill="x", padx=5, pady=5)
-
         # Actions Frame (Add to Targets / Add to Ignore List side-by-side)
         actions_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         actions_frame.pack(fill="x", padx=5, pady=(5, 10))
         actions_frame.grid_columnconfigure(0, weight=1)
         actions_frame.grid_columnconfigure(1, weight=1)
-
         self.btn_add_filter = ctk.CTkButton(
             actions_frame, text="Add to Targets 🎯",
             fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.add_target_item
         )
         self.btn_add_filter.grid(row=0, column=0, padx=(0, 4), sticky="ew")
-
         self.btn_add_ignore = ctk.CTkButton(
             actions_frame, text="Add to Ignore List ⛔",
             fg_color=COLOR_SECONDARY, hover_color=COLOR_SEC_HOVER,
             command=self.add_ignored_item
         )
         self.btn_add_ignore.grid(row=0, column=1, padx=(4, 0), sticky="ew")
-
         # Split Container for Targets vs Ignores side-by-side
         split_frame = ctk.CTkFrame(scroll_frame, fg_color="transparent")
         split_frame.pack(fill="both", expand=True, padx=5, pady=5)
         split_frame.grid_columnconfigure(0, weight=1)
         split_frame.grid_columnconfigure(1, weight=1)
-
         # ----------------------------------------------------
         # COLUMN 0: TARGETS PANEL
         # ----------------------------------------------------
         targets_panel = ctk.CTkFrame(split_frame, fg_color="#141414", border_color=COLOR_BORDER, border_width=1)
         targets_panel.grid(row=0, column=0, padx=(0, 6), pady=5, sticky="nsew")
-
         lbl_t_title = ctk.CTkLabel(targets_panel, text="Active Target List 🎯", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
         lbl_t_title.pack(anchor="w", padx=12, pady=(10, 5))
-
         self.target_box_container = ctk.CTkFrame(targets_panel, fg_color="transparent", height=130)
         self.target_box_container.pack(fill="x", padx=12, pady=(0, 5))
         self.target_box_container.pack_propagate(False)
-
         self.target_box = ctk.CTkTextbox(
             self.target_box_container, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1,
             text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=18
         )
         self.target_box.pack(fill="both", expand=True)
-
         remove_t_frame = ctk.CTkFrame(targets_panel, fg_color="transparent")
         remove_t_frame.pack(fill="x", padx=12, pady=(5, 5))
-
         self.combo_active_targets = ctk.CTkComboBox(
             remove_t_frame, values=["Select a target to remove..."],
             fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT,
             dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
         )
         self.combo_active_targets.pack(side="left", fill="x", expand=True, padx=(0, 5))
-
         self.btn_remove_target = ctk.CTkButton(
             remove_t_frame, text="Remove",
             fg_color="#e67e22", hover_color="#d35400",
@@ -1533,7 +1485,6 @@ class PeekerGUI(ctk.CTk):
             width=80
         )
         self.btn_remove_target.pack(side="right")
-
         self.btn_clear_filters = ctk.CTkButton(
             targets_panel, text="Clear Target List",
             fg_color="#e74c3c", hover_color="#c0392b",
@@ -1543,36 +1494,29 @@ class PeekerGUI(ctk.CTk):
             height=28
         )
         self.btn_clear_filters.pack(fill="x", padx=12, pady=(5, 10))
-
         # ----------------------------------------------------
         # COLUMN 1: IGNORES PANEL
         # ----------------------------------------------------
         ignores_panel = ctk.CTkFrame(split_frame, fg_color="#141414", border_color=COLOR_BORDER, border_width=1)
         ignores_panel.grid(row=0, column=1, padx=(6, 0), pady=5, sticky="nsew")
-
         lbl_i_title = ctk.CTkLabel(ignores_panel, text="Active Ignore List ⛔", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_PRIMARY)
         lbl_i_title.pack(anchor="w", padx=12, pady=(10, 5))
-
         self.ignore_box_container = ctk.CTkFrame(ignores_panel, fg_color="transparent", height=130)
         self.ignore_box_container.pack(fill="x", padx=12, pady=(0, 5))
         self.ignore_box_container.pack_propagate(False)
-
         self.ignore_box = ctk.CTkTextbox(
             self.ignore_box_container, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1,
             text_color=COLOR_TEXT, font=ctk.CTkFont(size=11), height=18
         )
         self.ignore_box.pack(fill="both", expand=True)
-
         remove_i_frame = ctk.CTkFrame(ignores_panel, fg_color="transparent")
         remove_i_frame.pack(fill="x", padx=12, pady=(5, 5))
-
         self.combo_active_ignores = ctk.CTkComboBox(
             remove_i_frame, values=["Select an item to un-ignore..."],
             fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT,
             dropdown_fg_color=COLOR_FRAME, dropdown_hover_color=COLOR_SECONDARY
         )
         self.combo_active_ignores.pack(side="left", fill="x", expand=True, padx=(0, 5))
-
         self.btn_remove_ignore = ctk.CTkButton(
             remove_i_frame, text="Un-ignore",
             fg_color="#e67e22", hover_color="#d35400",
@@ -1581,7 +1525,6 @@ class PeekerGUI(ctk.CTk):
             width=80
         )
         self.btn_remove_ignore.pack(side="right")
-
         self.btn_clear_ignores = ctk.CTkButton(
             ignores_panel, text="Clear Ignore List",
             fg_color="#e74c3c", hover_color="#c0392b",
@@ -1591,9 +1534,7 @@ class PeekerGUI(ctk.CTk):
             height=28
         )
         self.btn_clear_ignores.pack(fill="x", padx=12, pady=(5, 10))
-
         self.update_target_box()
- 
     def build_grade_filters_tab(self) -> None:
         # Main content area for the tab, expanded to fill the full panel height
         scroll_frame = ctk.CTkFrame(
@@ -1601,7 +1542,6 @@ class PeekerGUI(ctk.CTk):
             fg_color="transparent"
         )
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
- 
         lbl_grade_title = ctk.CTkLabel(
             scroll_frame,
             text="Stop relogger if ANY item of checked rarity drops:",
@@ -1609,15 +1549,12 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_TEXT
         )
         lbl_grade_title.pack(anchor="w", padx=5, pady=(5, 10))
- 
         # Checkboxes for grades
         self.grade_vars = {}
         grades_list = ["RARE", "BEYOND", "LEGENDARY", "IMMORTAL", "ARCANA", "CELESTIAL", "DIVINE", "COSMIC"]
-        
         for g in grades_list:
             var = ctk.BooleanVar(value=(g in self.target_grades))
             self.grade_vars[g] = var
-            
             cb = ctk.CTkCheckBox(
                 scroll_frame,
                 text=g.capitalize(),
@@ -1629,7 +1566,6 @@ class PeekerGUI(ctk.CTk):
                 text_color=COLOR_TEXT
             )
             cb.pack(anchor="w", padx=15, pady=5)
- 
         lbl_except = ctk.CTkLabel(
             scroll_frame,
             text="⚠️ Note: Soulstones are automatically EXCLUDED from grade-based matching to prevent useless stops.",
@@ -1639,7 +1575,6 @@ class PeekerGUI(ctk.CTk):
             justify="left"
         )
         lbl_except.pack(anchor="w", padx=5, pady=(15, 5))
- 
     def build_notifications_tab(self) -> None:
         # Main content area for the tab, expanded to fill the full panel height
         scroll_frame = ctk.CTkFrame(
@@ -1647,7 +1582,6 @@ class PeekerGUI(ctk.CTk):
             fg_color="transparent"
         )
         scroll_frame.pack(fill="both", expand=True, padx=5, pady=5)
- 
         lbl_discord_title = ctk.CTkLabel(
             scroll_frame,
             text="Discord Webhook Notifications",
@@ -1655,7 +1589,6 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_TEXT
         )
         lbl_discord_title.pack(anchor="w", padx=5, pady=(5, 10))
- 
         # Checkbox to enable/disable Discord alerts
         self.discord_notify_var = ctk.BooleanVar(value=self.discord_notify_enabled)
         cb_notify = ctk.CTkCheckBox(
@@ -1669,7 +1602,6 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_TEXT
         )
         cb_notify.pack(anchor="w", padx=15, pady=5)
- 
         # Discord Webhook URL Entry
         lbl_webhook_url = ctk.CTkLabel(
             scroll_frame,
@@ -1678,7 +1610,6 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_MUTED
         )
         lbl_webhook_url.pack(anchor="w", padx=5, pady=(10, 2))
- 
         self.entry_webhook_url = ctk.CTkEntry(
             scroll_frame,
             fg_color=COLOR_ENTRY_BG,
@@ -1690,7 +1621,6 @@ class PeekerGUI(ctk.CTk):
         self.entry_webhook_url.pack(fill="x", padx=5, pady=5)
         self.entry_webhook_url.insert(0, self.discord_webhook_url)
         self.entry_webhook_url.bind("<KeyRelease>", self.on_webhook_url_typed)
- 
         # Discord User ID Entry (for @mention)
         lbl_user_id = ctk.CTkLabel(
             scroll_frame,
@@ -1699,7 +1629,6 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_MUTED
         )
         lbl_user_id.pack(anchor="w", padx=5, pady=(5, 2))
- 
         self.entry_discord_user_id = ctk.CTkEntry(
             scroll_frame,
             fg_color=COLOR_ENTRY_BG,
@@ -1711,7 +1640,6 @@ class PeekerGUI(ctk.CTk):
         self.entry_discord_user_id.pack(fill="x", padx=5, pady=2)
         self.entry_discord_user_id.insert(0, self.discord_user_id)
         self.entry_discord_user_id.bind("<KeyRelease>", self.on_discord_user_id_typed)
- 
         # Test notification button
         self.btn_test_webhook = ctk.CTkButton(
             scroll_frame,
@@ -1721,110 +1649,175 @@ class PeekerGUI(ctk.CTk):
             command=self.send_test_discord_notification
         )
         self.btn_test_webhook.pack(fill="x", padx=5, pady=(15, 5))
- 
-        # Divider Line
-        divider = ctk.CTkFrame(scroll_frame, height=2, fg_color=COLOR_BORDER)
-        divider.pack(fill="x", pady=15)
- 
-        lbl_trainer_title = ctk.CTkLabel(
-            scroll_frame,
-            text="TBH Trainer Automation",
-            font=ctk.CTkFont(size=12, weight="bold"),
-            text_color=COLOR_TEXT
-        )
-        lbl_trainer_title.pack(anchor="w", padx=5, pady=(5, 10))
- 
-        # Checkbox to enable/disable Trainer Auto Launch
-        self.trainer_auto_launch_var = ctk.BooleanVar(value=self.trainer_auto_launch)
-        cb_trainer = ctk.CTkCheckBox(
-            scroll_frame,
-            text="Auto-launch Trainer on Target Found",
-            variable=self.trainer_auto_launch_var,
-            command=self.on_trainer_auto_launch_toggled,
-            fg_color=COLOR_PRIMARY,
-            hover_color=COLOR_HOVER,
-            border_color=COLOR_BORDER,
-            text_color=COLOR_TEXT
-        )
-        cb_trainer.pack(anchor="w", padx=15, pady=5)
- 
-        # Trainer Path Entry
-        lbl_trainer_path = ctk.CTkLabel(
-            scroll_frame,
-            text="TBH Trainer.exe Path:",
-            font=ctk.CTkFont(size=11, weight="bold"),
-            text_color=COLOR_MUTED
-        )
-        lbl_trainer_path.pack(anchor="w", padx=5, pady=(10, 2))
- 
-        trainer_path_row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
-        trainer_path_row.pack(fill="x", padx=5)
- 
-        self.entry_trainer_path = ctk.CTkEntry(
-            trainer_path_row,
-            fg_color=COLOR_ENTRY_BG,
-            border_color=COLOR_BORDER,
-            text_color=COLOR_TEXT,
-            font=ctk.CTkFont(size=11)
-        )
-        self.entry_trainer_path.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        self.entry_trainer_path.insert(0, self.trainer_path)
-        self.entry_trainer_path.bind("<KeyRelease>", self.on_trainer_path_typed)
- 
-        self.btn_browse_trainer = ctk.CTkButton(
-            trainer_path_row,
-            text="Browse",
-            width=60,
-            height=28,
-            fg_color=COLOR_SECONDARY,
-            hover_color=COLOR_SEC_HOVER,
-            command=self.browse_trainer_path
-        )
-        self.btn_browse_trainer.pack(side="right")
- 
-    def on_trainer_auto_launch_toggled(self) -> None:
-        self.trainer_auto_launch = self.trainer_auto_launch_var.get()
-        self.save_peeker_config()
-        self.append_log(f"[CONFIG] Trainer auto-launch enabled: {self.trainer_auto_launch}\n")
- 
-    def on_trainer_path_typed(self, event: Any) -> None:
-        self.trainer_path = self.entry_trainer_path.get().strip()
-        self.save_peeker_config()
- 
-    def browse_trainer_path(self) -> None:
-        from tkinter import filedialog
-        path = filedialog.askopenfilename(
-            title="Select TBH Trainer.exe",
-            filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
-        )
-        if path:
-            self.trainer_path = os.path.normpath(path)
-            self.entry_trainer_path.delete(0, "end")
-            self.entry_trainer_path.insert(0, self.trainer_path)
-            self.save_peeker_config()
-            self.append_log(f"[CONFIG] Trainer path updated to: {self.trainer_path}\n")
- 
+            # def on_trainer_auto_launch_toggled(self) -> None:
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.trainer_auto_launch = self.trainer_auto_launch_var.get()
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.save_peeker_config()
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.append_log(f"[CONFIG] Trainer auto-launch enabled: {self.trainer_auto_launch}\n")
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # def on_trainer_path_typed(self, event: Any) -> None:
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.trainer_path = self.entry_trainer_path.get().strip()
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.save_peeker_config()
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # def browse_trainer_path(self) -> None:
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # from tkinter import filedialog
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # path = filedialog.askopenfilename(
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # title="Select TBH Trainer.exe",
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # filetypes=[("Executable Files", "*.exe"), ("All Files", "*.*")]
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # )
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # if path:
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.trainer_path = os.path.normpath(path)
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.entry_trainer_path.delete(0, "end")
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.entry_trainer_path.insert(0, self.trainer_path)
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.save_peeker_config()
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # self.append_log(f"[CONFIG] Trainer path updated to: {self.trainer_path}\n")
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
+    # 
     def on_discord_notify_toggled(self) -> None:
         self.discord_notify_enabled = self.discord_notify_var.get()
         self.save_peeker_config()
         self.append_log(f"[CONFIG] Discord notification enabled: {self.discord_notify_enabled}\n")
- 
     def on_webhook_url_typed(self, event: Any) -> None:
         self.discord_webhook_url = self.entry_webhook_url.get().strip()
         self.save_peeker_config()
- 
     def on_discord_user_id_typed(self, event: Any) -> None:
         self.discord_user_id = self.entry_discord_user_id.get().strip()
         self.save_peeker_config()
- 
     def send_test_discord_notification(self) -> None:
         url = self.entry_webhook_url.get().strip()
         if not url:
             self.append_log("[DISCORD] Cannot send test notification: Webhook URL is empty.\n")
             return
-        
         self.append_log("[DISCORD] Sending test notification...\n")
-        
         def run_test():
             payload = {
                 "username": "TBH Chest Peeker",
@@ -1835,13 +1828,10 @@ class PeekerGUI(ctk.CTk):
                 self.after(0, lambda: self.append_log("[DISCORD] Test notification sent successfully!\n"))
             else:
                 self.after(0, lambda: self.append_log(f"[DISCORD] [ERROR] Failed to send test notification: {msg}\n"))
- 
         threading.Thread(target=run_test, daemon=True).start()
- 
     def post_to_discord_webhook(self, url: str, payload: dict) -> tuple[bool, str]:
         import urllib.request
         import urllib.error
-        
         try:
             req = urllib.request.Request(
                 url,
@@ -1861,13 +1851,10 @@ class PeekerGUI(ctk.CTk):
             return False, f"URL Error: {e.reason}"
         except Exception as e:
             return False, str(e)
- 
     def notify_discord_match(self, item_id: int, item_name: str, grade: str, action_type: str) -> None:
         if not self.discord_notify_enabled or not self.discord_webhook_url:
             return
-        
         import datetime
-        
         # Color based on item grade
         color_hex_map = {
             "RARE": 0x3498db,      # Blue
@@ -1881,7 +1868,6 @@ class PeekerGUI(ctk.CTk):
             "BOSS": 0x34495e,      # Dark Gray
         }
         color = color_hex_map.get(grade.upper(), 0xbdc3c7) # default gray
-        
         title = "🎯 Target Item Filter Matched!"
         if action_type == "chests":
             desc = f"**Item Found in Upcoming Chests!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger has paused to let you collect it.*"
@@ -1891,7 +1877,6 @@ class PeekerGUI(ctk.CTk):
             desc = f"**Item Collected (Synthesis)!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}\n\n*The relogger is resuming automated re-entry.*"
         else:
             desc = f"**Item Detected!**\n\n• **Name**: {item_name}\n• **ID**: {item_id}\n• **Grade**: {grade}"
-            
         payload = {
             "username": "TBH Chest Peeker",
             "embeds": [
@@ -1903,23 +1888,18 @@ class PeekerGUI(ctk.CTk):
                 }
             ]
         }
-        
         # Add @mention if Discord User ID is set
         if self.discord_user_id:
             payload["content"] = f"<@{self.discord_user_id}>"
-        
         def run_notify():
             success, msg = self.post_to_discord_webhook(self.discord_webhook_url, payload)
             if not success:
                 self.after(0, lambda: self.append_log(f"[DISCORD] [ERROR] Failed to send webhook alert: {msg}\n"))
-                
         threading.Thread(target=run_notify, daemon=True).start()
- 
     def build_right_panel(self) -> None:
         # Live Stage Peek Feed
         self.feed_frame = ctk.CTkFrame(self.right_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
         self.feed_frame.pack(fill="both", expand=True, pady=(0, 10))
- 
         lbl = ctk.CTkLabel(
             self.feed_frame, 
             text="Live Peek Feed", 
@@ -1927,11 +1907,9 @@ class PeekerGUI(ctk.CTk):
             text_color=COLOR_TEXT
         )
         lbl.pack(anchor="w", padx=15, pady=(10, 5))
- 
         # Standard Tkinter Text wrapped in CTkFrame for styling, and scrolled with CTkScrollbar
         log_container = ctk.CTkFrame(self.feed_frame, fg_color=COLOR_BG, border_color=COLOR_BORDER, border_width=1)
         log_container.pack(fill="both", expand=True, padx=15, pady=(0, 15))
- 
         self.txt_log = tk.Text(
             log_container,
             bg=COLOR_BG,
@@ -1944,11 +1922,9 @@ class PeekerGUI(ctk.CTk):
             font=("Consolas", 9)
         )
         self.txt_log.pack(side="left", fill="both", expand=True, padx=(10, 0), pady=10)
- 
         scrollbar = ctk.CTkScrollbar(log_container, command=self.txt_log.yview, button_color=COLOR_PRIMARY, button_hover_color=COLOR_HOVER)
         scrollbar.pack(side="right", fill="y", padx=(5, 5), pady=10)
         self.txt_log.configure(yscrollcommand=scrollbar.set)
- 
     # =====================================================================
     # Log / Status / Label Updaters
     # =====================================================================
@@ -1956,25 +1932,20 @@ class PeekerGUI(ctk.CTk):
         """Appends plain logs to the Live Feed terminal widget."""
         self.txt_log.insert("end", text)
         self.txt_log.see("end")
- 
     def append_colored_drop(self, idx: int, name: str, grade: str, is_chest: bool = False) -> None:
         """Appends item display lines formatted using color markers."""
         color = GRADE_COLORS.get(grade.upper(), COLOR_TEXT)
         lbl_type = "Chest" if is_chest else "Drop"
         tag_name = f"grade_{grade.upper()}"
-        
         # Configure tag color once (Tkinter handles duplicates safely)
         self.txt_log.tag_config(tag_name, foreground=color)
-        
         if is_chest:
             self.txt_log.insert("end", f"[{idx}] {lbl_type}: ")
             self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
         else:
             self.txt_log.insert("end", "   └─ Drop: ")
             self.txt_log.insert("end", f"{name} [{grade}]\n", tag_name)
-            
         self.txt_log.see("end")
- 
     def update_cal_labels(self) -> None:
         if not hasattr(self, 'lbl_cal_status') or not self.lbl_cal_status.winfo_exists():
             return
@@ -1985,7 +1956,6 @@ class PeekerGUI(ctk.CTk):
         self.lbl_cal_status.configure(
             text=f"Coords: Menu ({menu_st}), Title ({exit_st}), Start ({stage_st}), Enter ({conf_st})"
         )
- 
     def on_relogger_method_changed(self, method: str) -> None:
         if method == "Process Restart":
             self.relogger_method = "process_restart"
@@ -1993,20 +1963,18 @@ class PeekerGUI(ctk.CTk):
             self.relogger_method = "mouse_clicks"
         self.save_peeker_config()
         self.update_relogger_ui_visibility()
- 
     def update_relogger_ui_visibility(self) -> None:
         if self.relogger_method == "process_restart":
-            if hasattr(self, 'clicks_container') and self.clicks_container.winfo_exists():
+            if hasattr(self, 'clicks_container') and self.clicks_container and self.clicks_container.winfo_exists():
                 self.clicks_container.pack_forget()
             if hasattr(self, 'restart_container') and self.restart_container.winfo_exists():
                 self.restart_container.pack(fill="x", padx=15, pady=5)
         else:
             if hasattr(self, 'restart_container') and self.restart_container.winfo_exists():
                 self.restart_container.pack_forget()
-            if hasattr(self, 'clicks_container') and self.clicks_container.winfo_exists():
+            if hasattr(self, 'clicks_container') and self.clicks_container and self.clicks_container.winfo_exists():
                 self.clicks_container.pack(fill="x", padx=15, pady=5)
                 self.update_cal_labels()
- 
     def browse_game_path(self) -> None:
         from tkinter import filedialog
         initial_dir = "C:\\"
@@ -2023,11 +1991,9 @@ class PeekerGUI(ctk.CTk):
             self.entry_game_path.insert(0, self.game_path)
             self.save_peeker_config()
             self.append_log(f"[CONFIG] Game path updated to: {self.game_path}\n")
- 
     def on_game_path_typed(self, event: Any) -> None:
         self.game_path = self.entry_game_path.get().strip()
         self.save_peeker_config()
- 
     def on_pause_delay_typed(self, event: Any) -> None:
         try:
             val = int(self.entry_pause_delay.get().strip())
@@ -2036,7 +2002,6 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
- 
     def on_safety_delay_typed(self, event: Any) -> None:
         try:
             val = int(self.entry_safety_delay.get().strip())
@@ -2045,7 +2010,6 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
- 
     def on_max_chest_index_typed(self, event: Any) -> None:
         try:
             val = int(self.entry_max_chest_index.get().strip())
@@ -2054,7 +2018,6 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
-
     def on_rare_cooldown_typed(self, event: Any) -> None:
         try:
             val = int(self.entry_rare_cooldown.get().strip())
@@ -2063,7 +2026,6 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
-
     def on_uncommon_cooldown_typed(self, event: Any) -> None:
         try:
             val = int(self.entry_uncommon_cooldown.get().strip())
@@ -2072,7 +2034,6 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
         except Exception:
             pass
- 
     def update_target_box(self) -> None:
         # 1. Update Target Box
         self.target_box.configure(state="normal")
@@ -2095,13 +2056,11 @@ class PeekerGUI(ctk.CTk):
                     self.target_box.insert("end", f" {idx}. {disp_str}\n")
                     active_vals.append(disp_str)
         self.target_box.configure(state="disabled")
-        
         # Update the active targets removal dropdown
         if hasattr(self, "combo_active_targets"):
             self.combo_active_targets.configure(values=active_vals)
             if active_vals:
                 self.combo_active_targets.set(active_vals[0])
-
         # 2. Update Ignore Box
         if hasattr(self, "ignore_box"):
             self.ignore_box.configure(state="normal")
@@ -2124,18 +2083,15 @@ class PeekerGUI(ctk.CTk):
                         self.ignore_box.insert("end", f" {idx}. {disp_str}\n")
                         active_ignores.append(disp_str)
             self.ignore_box.configure(state="disabled")
-            
             # Update the active ignores removal dropdown
             if hasattr(self, "combo_active_ignores"):
                 self.combo_active_ignores.configure(values=active_ignores)
                 if active_ignores:
                     self.combo_active_ignores.set(active_ignores[0])
-
     def remove_target_item(self) -> None:
         selected = self.combo_active_targets.get()
         if "ID: " not in selected and "Item ID: " not in selected:
             return
-        
         item_id = None
         match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
         if match:
@@ -2144,18 +2100,15 @@ class PeekerGUI(ctk.CTk):
             match = re.search(r"Item ID:\s*(?P<id>\d+)", selected)
             if match:
                 item_id = int(match.group("id"))
-                
         if item_id is not None and item_id in self.target_items:
             self.target_items.remove(item_id)
             self.save_peeker_config()
             self.update_target_box()
             self.append_log(f"[FILTER] Removed Item ID {item_id} from targets.\n")
-
     def remove_ignored_item(self) -> None:
         selected = self.combo_active_ignores.get()
         if "ID: " not in selected and "Item ID: " not in selected:
             return
-        
         item_id = None
         match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
         if match:
@@ -2164,19 +2117,16 @@ class PeekerGUI(ctk.CTk):
             match = re.search(r"Item ID:\s*(?P<id>\d+)", selected)
             if match:
                 item_id = int(match.group("id"))
-                
         if item_id is not None and item_id in self.ignored_items:
             self.ignored_items.remove(item_id)
             self.save_peeker_config()
             self.update_target_box()
             self.append_log(f"[FILTER] Removed Item ID {item_id} from ignores.\n")
- 
     def get_item_info_by_id(self, item_id: int) -> dict[str, Any] | None:
         for x in self.items_db:
             if x.get("id") == item_id:
                 return x
         return None
- 
     def get_item_name(self, info: dict[str, Any] | None, default: str = "Unknown") -> str:
         if not info:
             return default
@@ -2184,7 +2134,6 @@ class PeekerGUI(ctk.CTk):
         if not isinstance(name_dict, dict):
             return default
         return name_dict.get("en-US", name_dict.get("en", default))
-
     def estimate_chest_cooldown(self, chest_id: int | None) -> int:
         if chest_id is None:
             return self.uncommon_chest_cooldown
@@ -2193,11 +2142,9 @@ class PeekerGUI(ctk.CTk):
             return self.uncommon_chest_cooldown
         name = self.get_item_name(c_info, "").lower()
         grade = c_info.get("grade", "COMMON").upper()
-        
         if "boss" in name or "rare" in name or grade in ["RARE", "BOSS"]:
             return self.rare_chest_cooldown
         return self.uncommon_chest_cooldown
- 
     # =====================================================================
     # Item Search & Filtering
     # =====================================================================
@@ -2206,7 +2153,6 @@ class PeekerGUI(ctk.CTk):
         if not query:
             self.combo_results.configure(values=["Type a keyword first..."])
             return
- 
         matches = []
         for x in self.items_db:
             name_en = self.get_item_name(x, "").lower()
@@ -2215,7 +2161,6 @@ class PeekerGUI(ctk.CTk):
             if isinstance(name_dict, dict):
                 name_id = name_dict.get("id", "").lower()
             item_id = str(x.get("id", ""))
-            
             if query in name_en or query in name_id or query == item_id:
                 name_en_disp = self.get_item_name(x, "Unknown")
                 grade = x.get("grade", "COMMON")
@@ -2223,19 +2168,16 @@ class PeekerGUI(ctk.CTk):
                 matches.append(f"{name_en_disp}{level} [{grade}] (ID: {x['id']})")
                 if len(matches) >= 30: # Limit to 30 items
                     break
-        
         if matches:
             self.combo_results.configure(values=matches)
             self.combo_results.set(matches[0])
         else:
             self.combo_results.configure(values=["No matches found."])
             self.combo_results.set("No matches found.")
- 
     def add_target_item(self) -> None:
         selected = self.combo_results.get()
         if "ID: " not in selected:
             return
-        
         match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
         if match:
             item_id = int(match.group("id"))
@@ -2244,12 +2186,10 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
                 self.update_target_box()
                 self.append_log(f"[FILTER] Added Item ID {item_id} to targets.\n")
-
     def add_ignored_item(self) -> None:
         selected = self.combo_results.get()
         if "ID: " not in selected:
             return
-        
         match = re.search(r"\(ID:\s*(?P<id>\d+)\)", selected)
         if match:
             item_id = int(match.group("id"))
@@ -2258,24 +2198,20 @@ class PeekerGUI(ctk.CTk):
                 self.save_peeker_config()
                 self.update_target_box()
                 self.append_log(f"[FILTER] Added Item ID {item_id} to ignores.\n")
- 
     def clear_target_items(self) -> None:
         self.target_items = []
         self.save_peeker_config()
         self.update_target_box()
         self.append_log("[FILTER] Cleared all target items.\n")
-
     def clear_ignored_items(self) -> None:
         self.ignored_items = []
         self.save_peeker_config()
         self.update_target_box()
         self.append_log("[FILTER] Cleared all ignored items.\n")
- 
     def save_grades_config(self) -> None:
         self.target_grades = [g for g, var in self.grade_vars.items() if var.get()]
         self.save_peeker_config()
         self.append_log(f"[FILTER] Target Grades updated: {self.target_grades}\n")
- 
     # =====================================================================
     # Calibration Functions (F8 listener)
     # =====================================================================
@@ -2294,7 +2230,6 @@ class PeekerGUI(ctk.CTk):
         # Play tiny beep to confirm mode start
         if winsound:
             winsound.Beep(600, 150)
- 
     def check_hotkeys(self) -> None:
         # Check F8 Calibration key (VK code: 0x77)
         if self.calibrating_key:
@@ -2302,30 +2237,24 @@ class PeekerGUI(ctk.CTk):
             if (ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000) != 0:
                 pt = POINT()
                 ctypes.windll.user32.GetCursorPos(ctypes.byref(pt))
-                
                 self.coords[self.calibrating_key] = [pt.x, pt.y]
                 self.calibrating_key = None
                 self.save_peeker_config()
-                
                 self.update_cal_labels()
                 self.lbl_cal_status.configure(text_color=COLOR_MUTED)
                 self.append_log(f"[CALIB] Calibrated {self.calibrating_key} to coordinates: {pt.x}, {pt.y}\n")
                 if winsound:
                     winsound.Beep(1000, 250)
-                
                 # Debounce: wait until key released
                 while (ctypes.windll.user32.GetAsyncKeyState(0x77) & 0x8000) != 0:
                     time.sleep(0.05)
- 
         # Check F9 Emergency Stop key (VK code: 0x78)
         if self.relogger_active:
             if (ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8000) != 0:
                 self.stop_relogger("EMERGENCY STOP (F9 Pressed)")
                 while (ctypes.windll.user32.GetAsyncKeyState(0x78) & 0x8000) != 0:
                     time.sleep(0.05)
- 
         self.after(50, self.check_hotkeys)
- 
     # =====================================================================
     # Proxy Process Runner
     # =====================================================================
@@ -2333,9 +2262,7 @@ class PeekerGUI(ctk.CTk):
         cert_path = Path(os.path.expandvars(r"%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer"))
         if cert_path.exists():
             return True
-        
         self.append_log("[INFO] Certificate not found. Generating certificate via mitmproxy...\n")
-        
         # Start proxy briefly to generate cert
         port = 8877
         try:
@@ -2343,7 +2270,6 @@ class PeekerGUI(ctk.CTk):
             port = int(pdata.get("listen_port", 8877))
         except Exception:
             pass
-            
         common_args = [
             "-q",
             "-s",
@@ -2355,7 +2281,6 @@ class PeekerGUI(ctk.CTk):
             "--set",
             "block_global=false",
         ]
-        
         mitmdump = shutil.which("mitmdump")
         if mitmdump:
             cmd = [mitmdump, *common_args]
@@ -2367,7 +2292,6 @@ class PeekerGUI(ctk.CTk):
                 "from mitmproxy.tools.main import mitmdump; mitmdump()",
                 *common_args
             ]
-            
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -2387,7 +2311,6 @@ class PeekerGUI(ctk.CTk):
         except Exception as e:
             self.append_log(f"[ERROR] Failed to generate certificate: {e}\n")
             return False
- 
     def install_cert_automatically(self) -> None:
         cert_path = Path(os.path.expandvars(r"%USERPROFILE%\.mitmproxy\mitmproxy-ca-cert.cer"))
         if not cert_path.exists():
@@ -2395,9 +2318,7 @@ class PeekerGUI(ctk.CTk):
                 self.append_log("[ERROR] Certificate file not found and could not generate. Please run proxy manually first.\n")
                 messagebox.showerror("Error", "Certificate file not found and could not be generated automatically.")
                 return
-        
         self.append_log(f"[INFO] Installing certificate: {cert_path}...\n")
-        
         def work():
             cmd = ["certutil", "-addstore", "-user", "root", str(cert_path)]
             try:
@@ -2423,26 +2344,20 @@ class PeekerGUI(ctk.CTk):
             except Exception as e:
                 self.append_log(f"[ERROR] Failed to run certutil: {e}\n")
                 self.after(0, lambda err=e: messagebox.showerror("Error", f"Failed to run certutil: {err}"))
- 
         threading.Thread(target=work, daemon=True).start()
- 
     def toggle_proxy(self) -> None:
         if self.proxy_running:
             self.stop_proxy()
         else:
             self.start_proxy()
- 
     def start_proxy(self) -> None:
         if self.proxy_running:
             return
-        
         # Verify peeker script exists
         if not ADDON_PATH.exists():
             self.append_log(f"[ERROR] chest_peeker.py not found at: {ADDON_PATH}\n")
             return
-        
         self.btn_proxy.configure(text="Stopping Proxy...", state="disabled")
-        
         def work():
             # Get configured port from config.json if available
             port = 8877
@@ -2453,7 +2368,6 @@ class PeekerGUI(ctk.CTk):
                     port = int(pdata.get("listen_port", 8877))
                 except Exception:
                     pass
- 
             # Automatically clean up any leftover processes listening on this port before starting
             try:
                 if os.name == 'nt':
@@ -2483,7 +2397,6 @@ class PeekerGUI(ctk.CTk):
                             time.sleep(0.5)
             except Exception as pe:
                 self.log_gui_error(f"Failed to clear port {port}: {pe}")
- 
             # Run mitmdump directly to prevent grandchild process pipe issues
             mitmdump_bin = shutil.which("mitmdump")
             common_args = [
@@ -2509,11 +2422,9 @@ class PeekerGUI(ctk.CTk):
                     "from mitmproxy.tools.main import mitmdump; mitmdump()",
                     *common_args
                 ]
-            
             try:
                 env = os.environ.copy()
                 env["PYTHONUTF8"] = "1"
-                
                 self.proxy_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
@@ -2525,20 +2436,16 @@ class PeekerGUI(ctk.CTk):
                     env=env
                 )
                 self.proxy_running = True
-                
                 # Update UI inside main thread
                 def ready_ui():
                     self.btn_proxy.configure(text="Stop Peeker Proxy", fg_color=COLOR_PRIMARY, text_color="#ff0000", state="normal")
                     self.lbl_proxy_status.configure(text=f"Status: Active (listening on port {port})", text_color="#0f8304")
                     self.append_log(f"[PROXY] Proxy process started successfully.\n")
- 
                 self.after(0, ready_ui)
- 
                 # Read output stream line by line
                 if self.proxy_process.stdout:
                     for line in self.proxy_process.stdout:
                         self.parse_stdout_line(line)
-                
             except Exception as e:
                 self.log_gui_error(f"Failed to launch proxy: {e}")
             finally:
@@ -2548,21 +2455,17 @@ class PeekerGUI(ctk.CTk):
                     self.lbl_proxy_status.configure(text="Status: Stopped", text_color=COLOR_MUTED)
                     self.append_log("[PROXY] Proxy process finished.\n")
                 self.after(0, stopped_ui)
- 
         threading.Thread(target=work, daemon=True).start()
- 
     def stop_proxy(self) -> None:
         if not self.proxy_running:
             return
         self.append_log("[PROXY] Shutting down proxy...\n")
-        
         # Restore system proxy (chest_peeker restores it automatically on exit, but let's make sure)
         import winreg
         try:
             reg_path = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
             with winreg.OpenKey(winreg.HKEY_CURRENT_USER, reg_path, 0, winreg.KEY_SET_VALUE) as key:
                 winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
-            
             # Notify Windows settings changed
             INTERNET_OPTION_SETTINGS_CHANGED = 39
             INTERNET_OPTION_REFRESH = 37
@@ -2574,7 +2477,6 @@ class PeekerGUI(ctk.CTk):
                 pass
         except Exception:
             pass
- 
         if self.proxy_process:
             try:
                 # Forcefully terminate the process and all of its children (/t) on Windows
@@ -2591,31 +2493,26 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 pass
             self.proxy_process = None
- 
     def log_gui_error(self, msg: str) -> None:
         self.after(0, lambda: self.append_log(f"[ERROR] {msg}\n"))
- 
     # =====================================================================
     # Log / Stdout Parser & Relogger Logic
     # =====================================================================
     def parse_stdout_line(self, line: str) -> None:
         # Standard stdout forwarding
         cleaned = line.strip()
-        
         # Check for structured GUI tags
         if cleaned.startswith("__PEEK_RESULT__:"):
             parts = cleaned.split(":", 2)
             if len(parts) >= 3:
                 res_type = parts[1]
                 data_json = parts[2]
-                
                 try:
                     parsed_data = json.loads(data_json)
                     self.after(0, lambda: self.process_peek_result(res_type, parsed_data))
                 except Exception as e:
                     self.log_gui_error(f"Failed to parse result payload: {e}")
             return
-        
         # Debug traffic lines from proxy — show in log for traffic analysis
         if cleaned.startswith("__PEEK_DEBUG__:"):
             parts = cleaned.split(":", 2)
@@ -2624,14 +2521,11 @@ class PeekerGUI(ctk.CTk):
                 preview = parts[2][:120]
                 self.after(0, lambda: self.append_log(f"[TRAFFIC] Response ({body_size} bytes): {preview}...\n"))
             return
-        
         # Filter out ANSI sequences from terminal lines before appending to text area
         ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
         plain_line = ansi_escape.sub('', line)
-        
         if plain_line.strip() and not plain_line.startswith("=") and not plain_line.startswith(" Chest:") and not plain_line.startswith("    └─ Drop:"):
             self.after(0, lambda: self.append_log(plain_line))
- 
     def process_peek_result(self, res_type: str, data: Any) -> None:
         """Triggers UI layout displaying the items and checks filters for relogger."""
         try:
@@ -2639,17 +2533,14 @@ class PeekerGUI(ctk.CTk):
         except Exception as e:
             import traceback
             self.append_log(f"\n[CRITICAL ERROR] Error in process_peek_result: {e}\n{traceback.format_exc()}\n")
-
     def _process_peek_result_impl(self, res_type: str, data: Any) -> None:
         self.dashboard_scans_done += 1
         self.dashboard_last_activity = f"Scan {self.dashboard_scans_done}"
         self.update_dashboard_stats()
-        
         # Handle 'seen' results silently — these are item IDs from any server response.
         # If a target match is found while a countdown is running, auto-trigger safety relog.
         if res_type == "seen":
             seen_ids = data if isinstance(data, list) else []
-            
             # Desempilhar itens da fila sequencialmente para manter o controle de progresso
             for item_id in seen_ids:
                 if hasattr(self, 'current_stage_queue') and self.current_stage_queue and item_id in self.current_stage_queue:
@@ -2660,17 +2551,14 @@ class PeekerGUI(ctk.CTk):
                             popped_id = self.current_stage_queue.pop(0)
                             if hasattr(self, 'current_chest_queue') and self.current_chest_queue:
                                 self.current_chest_queue.pop(0)
-                            
                             popped_info = self.get_item_info_by_id(popped_id)
                             popped_name = self.get_item_name(popped_info, f"Item ({popped_id})")
                             self.append_log(f"[QUEUE] Chest opened: {popped_name}. Remaining drops: {len(self.current_stage_queue)}\n")
-                            
                             # Atualizar visual do card se for um item importante sendo coletado
                             if popped_info:
                                 grade = popped_info.get("grade", "COMMON").upper()
                                 is_soulstone = "soulstone" in popped_name.lower() or "soul stone" in popped_name.lower()
                                 card_key = "SOULSTONE" if is_soulstone else grade
-                                
                                 if hasattr(self, 'upcoming_card_widgets') and card_key in self.upcoming_card_widgets:
                                     widgets = self.upcoming_card_widgets[card_key]
                                     current_display_name = widgets["lbl_name"].cget("text")
@@ -2679,7 +2567,6 @@ class PeekerGUI(ctk.CTk):
                                         widgets["card"].configure(border_color="#2c3e50")
                     except Exception:
                         pass
-
             if not self.relogger_active:
                 return
             # Only act if a paused countdown is running (we found a target and are waiting)
@@ -2688,12 +2575,10 @@ class PeekerGUI(ctk.CTk):
             # Don't re-trigger if already in safety countdown
             if self.safety_countdown_active:
                 return
-            
             for item_id in seen_ids:
                 # Skip if in ignore list
                 if item_id in getattr(self, "ignored_items", []):
                     continue
-
                 # Check specific item targets
                 if item_id in self.target_items:
                     info = self.get_item_info_by_id(item_id) or {}
@@ -2702,7 +2587,6 @@ class PeekerGUI(ctk.CTk):
                     self.append_log(f"[LIVE DETECT] Item has been collected! Switching to anti-rollback safety delay...\n")
                     self.skip_to_safety_relog()
                     return
-                
                 # Check grade targets
                 info = self.get_item_info_by_id(item_id)
                 if info:
@@ -2717,7 +2601,6 @@ class PeekerGUI(ctk.CTk):
                         self.skip_to_safety_relog()
                         return
             return
- 
         # Handle server/auth errors with progressive backoff
         if res_type == "error":
             self.consecutive_errors += 1
@@ -2726,7 +2609,6 @@ class PeekerGUI(ctk.CTk):
             backoff = min(10 + (self.consecutive_errors - 1) * 5, 30)
             self.append_log(f"\n[ERROR] ⚠ Server error detected (HTTP {error_code})! Error #{self.consecutive_errors}\n")
             self.append_log(f"[ERROR] Backing off {backoff}s to let server/Steam session recover...\n")
- 
             if self.relogger_active and self.relogger_method == "process_restart":
                 self.reentry_in_progress = False
                 def error_recovery():
@@ -2745,141 +2627,285 @@ class PeekerGUI(ctk.CTk):
                     self.after(0, lambda: self.append_log(f"[WATCHDOG] Game killed. Will relaunch in ~{backoff}s...\n"))
                 threading.Thread(target=error_recovery, daemon=True).start()
             return
- 
         # Valid game data received — reset error counter
         self.consecutive_errors = 0
- 
-        self.append_log(f"\n======================================================\n")
-        self.append_log(f"   [PEEK FEED] DETECTED MAP DATA LOADED ({res_type.upper()})\n")
-        self.append_log(f"======================================================\n")
- 
         found_item_ids = []
         found_item_indices = []
         found_chest_ids = []
-        
         if res_type == "chests":
-            # list of lists: [[chest_id, reward_id], ...]
+            left_list = []
+            right_list = []
             for idx, (chest_id, reward_id) in enumerate(data, 1):
                 c_info = self.get_item_info_by_id(chest_id) or {}
                 r_info = self.get_item_info_by_id(reward_id) or {}
-                
                 c_name = self.get_item_name(c_info, f"Chest ({chest_id})")
                 r_name = self.get_item_name(r_info, f"Reward ({reward_id})")
                 r_grade = r_info.get("grade", "COMMON")
                 c_grade = c_info.get("grade", "COMMON")
-                if "boss" in c_name.lower():
+                is_boss_chest = "stageboss" in c_name.lower()
+                if is_boss_chest:
                     c_grade = "BOSS"
-                
-                self.append_colored_drop(idx, c_name, c_grade, is_chest=True)
-                self.append_colored_drop(idx, r_name, r_grade, is_chest=False)
-                
+                item_data = {
+                    "idx": idx,
+                    "c_name": c_name,
+                    "c_grade": c_grade,
+                    "r_name": r_name,
+                    "r_grade": r_grade
+                }
+                if is_boss_chest:
+                    left_list.append(item_data)
+                else:
+                    right_list.append(item_data)
                 found_item_ids.append(reward_id)
                 found_item_indices.append(idx)
                 found_chest_ids.append(chest_id)
-                
-        elif res_type == "direct":
-            # list of item_ids
-            for idx, item_id in enumerate(data, 1):
+            # Render side-by-side columns
+            col_width = 56
+            self.append_log(f"\n================================================================================================\n")
+            self.append_log(f"                               [PEEK FEED] DETECTED MAP DATA LOADED (CHESTS)\n")
+            self.append_log(f"================================================================================================\n")
+            header_left = " StageBoss Chests (Raros)"
+            header_right = " Normal Chests (Uncommon)"
+            divider = " │ "
+            self.append_log(header_left.ljust(col_width) + divider + header_right + "\n")
+            self.append_log("-" * col_width + "┼" + "-" * 38 + "\n")
+            num_rows = max(len(left_list), len(right_list))
+            for i in range(num_rows):
+                # --- LINE 1: Chest Info ---
+                # Left side
+                if i < len(left_list):
+                    item = left_list[i]
+                    lbl = f" [{i+1}] Chest: "
+                    val = f"{item['c_name']} [{item['c_grade']}]"
+                    self.txt_log.insert("end", lbl)
+                    tag_name = f"grade_{item['c_grade'].upper()}"
+                    self.txt_log.tag_config(tag_name, foreground=GRADE_COLORS.get(item['c_grade'].upper(), COLOR_TEXT))
+                    self.txt_log.insert("end", val, tag_name)
+                    curr_len = len(lbl) + len(val)
+                    if curr_len < col_width:
+                        self.txt_log.insert("end", " " * (col_width - curr_len))
+                else:
+                    self.txt_log.insert("end", " " * col_width)
+                # Divider
+                self.txt_log.insert("end", divider)
+                # Right side
+                if i < len(right_list):
+                    item = right_list[i]
+                    lbl = f" [{i+1}] Chest: "
+                    val = f"{item['c_name']} [{item['c_grade']}]"
+                    self.txt_log.insert("end", lbl)
+                    tag_name = f"grade_{item['c_grade'].upper()}"
+                    self.txt_log.tag_config(tag_name, foreground=GRADE_COLORS.get(item['c_grade'].upper(), COLOR_TEXT))
+                    self.txt_log.insert("end", val, tag_name)
+                self.txt_log.insert("end", "\n")
+                # --- LINE 2: Drop Info ---
+                # Left side
+                if i < len(left_list):
+                    item = left_list[i]
+                    lbl = "   └─ Drop: "
+                    val = f"{item['r_name']} [{item['r_grade']}]"
+                    self.txt_log.insert("end", lbl)
+                    tag_name = f"grade_{item['r_grade'].upper()}"
+                    self.txt_log.tag_config(tag_name, foreground=GRADE_COLORS.get(item['r_grade'].upper(), COLOR_TEXT))
+                    self.txt_log.insert("end", val, tag_name)
+                    curr_len = len(lbl) + len(val)
+                    if curr_len < col_width:
+                        self.txt_log.insert("end", " " * (col_width - curr_len))
+                else:
+                    self.txt_log.insert("end", " " * col_width)
+                # Divider
+                self.txt_log.insert("end", divider)
+                # Right side
+                if i < len(right_list):
+                    item = right_list[i]
+                    lbl = "   └─ Drop: "
+                    val = f"{item['r_name']} [{item['r_grade']}]"
+                    self.txt_log.insert("end", lbl)
+                    tag_name = f"grade_{item['r_grade'].upper()}"
+                    self.txt_log.tag_config(tag_name, foreground=GRADE_COLORS.get(item['r_grade'].upper(), COLOR_TEXT))
+                    self.txt_log.insert("end", val, tag_name)
+                self.txt_log.insert("end", "\n")
+            self.append_log(f"================================================================================================\n\n")
+        else:
+            self.append_log(f"\n======================================================\n")
+            self.append_log(f"   [PEEK FEED] DETECTED MAP DATA LOADED ({res_type.upper()})\n")
+            self.append_log(f"======================================================\n")
+            if res_type == "direct":
+                # list of item_ids
+                for idx, item_id in enumerate(data, 1):
+                    info = self.get_item_info_by_id(item_id) or {}
+                    name = self.get_item_name(info, f"Drop ({item_id})")
+                    grade = info.get("grade", "COMMON")
+                    self.append_colored_drop(idx, name, grade, is_chest=False)
+                    found_item_ids.append(item_id)
+                    found_item_indices.append(1)
+                    found_chest_ids.append(None)
+            elif res_type == "synthesis":
+                # single item_id
+                item_id = int(data)
                 info = self.get_item_info_by_id(item_id) or {}
                 name = self.get_item_name(info, f"Drop ({item_id})")
                 grade = info.get("grade", "COMMON")
-                self.append_colored_drop(idx, name, grade, is_chest=False)
-                
+                self.append_colored_drop(1, name, grade, is_chest=False)
                 found_item_ids.append(item_id)
                 found_item_indices.append(1)
                 found_chest_ids.append(None)
-                
-        elif res_type == "synthesis":
-            # single item_id
-            item_id = int(data)
-            info = self.get_item_info_by_id(item_id) or {}
-            name = self.get_item_name(info, f"Drop ({item_id})")
-            grade = info.get("grade", "COMMON")
-            self.append_colored_drop(1, name, grade, is_chest=False)
-            
-            found_item_ids.append(item_id)
-            found_item_indices.append(1)
-            found_chest_ids.append(None)
- 
-        self.append_log(f"======================================================\n\n")
+            self.append_log(f"======================================================\n\n")
         self.dashboard_loots_observed += len(found_item_ids)
         self.dashboard_last_activity = f"Observed {len(found_item_ids)} loot(s)"
         self.update_dashboard_stats()
- 
         # Save last found items so we can re-evaluate them immediately if relogger starts
         self.last_found_item_ids = found_item_ids
         self.last_found_item_indices = found_item_indices
         self.last_found_chest_ids = found_chest_ids
         self.last_found_res_type = res_type
         self.evaluate_filters_and_relog(found_item_ids, res_type, found_item_indices, found_chest_ids)
-
     def evaluate_filters_and_relog(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
         try:
             self._evaluate_filters_and_relog_impl(found_item_ids, res_type, item_indices, chest_ids)
         except Exception as e:
             import traceback
             self.append_log(f"\n[CRITICAL ERROR] Error in evaluate_filters_and_relog: {e}\n{traceback.format_exc()}\n")
-
     def _evaluate_filters_and_relog_impl(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
         if res_type == "chests":
             self.current_stage_queue = list(found_item_ids)
             self.current_chest_queue = list(chest_ids) if chest_ids else [None] * len(found_item_ids)
             self.target_chest_index = None
-
+            self.stageboss_chest_dropped_this_run = False
+            
+            self.stageboss_chest_queue = []
+            self.normal_chest_queue = []
+            
+            if chest_ids:
+                for item_id, chest_id in zip(found_item_ids, chest_ids):
+                    chest_id_str = str(chest_id)
+                    is_boss = chest_id_str.startswith("92") or chest_id_str.startswith("93")
+                    drop_info = {
+                        "item_id": item_id,
+                        "chest_id": chest_id,
+                        "is_unreachable": False
+                    }
+                    if is_boss:
+                        self.stageboss_chest_queue.append(drop_info)
+                    else:
+                        self.normal_chest_queue.append(drop_info)
+            else:
+                for item_id in found_item_ids:
+                    self.stageboss_chest_queue.append({"item_id": item_id, "chest_id": None, "is_unreachable": False})
+            
+            # Mark unreachable chests using Real-Time Residual Cooldown Extrapolation
+            total_normal = len(self.normal_chest_queue)
+            
+            boss_cd = 420
+            norm_cd = 240
+            try:
+                boss_cd = int(self.boss_cooldown_var.get())
+                norm_cd = int(self.normal_cooldown_var.get())
+            except:
+                pass
+                
+            now = time.time()
+            last_norm = getattr(self, "last_normal_drop_time", None) or now
+            last_boss = getattr(self, "last_boss_drop_time", None) or now
+            
+            # Stage ends when the last normal chest drops (+ small 60s buffer for completion/save write)
+            stage_end_time = last_norm + (total_normal * norm_cd) + 60
+            
+            for idx, item in enumerate(self.stageboss_chest_queue):
+                # Target drop time for this specific boss chest index
+                target_drop_time = last_boss + ((idx + 1) * boss_cd)
+                if target_drop_time > stage_end_time:
+                    item["is_unreachable"] = True
+                    # Only log unreachable status if we are actually using real extrapolated data (not just fallback 'now')
+                    if getattr(self, "last_boss_drop_time", None):
+                        diff_boss = int((target_drop_time - now)/60)
+                        diff_stage = int((stage_end_time - now)/60)
+                        self.append_log(f"[PROXY] Boss Chest #{idx+1} marked UNREACHABLE (Extrapolated Drop: ~{diff_boss}m > Stage End: ~{diff_stage}m).\n")
+                    
+            # Build unified timeline sorted by drop time (240s for Normal, 420s for StageBoss)
+            unified = []
+            for i, item in enumerate(self.normal_chest_queue):
+                unified.append({
+                    "time": 240 * (i + 1),
+                    "is_normal": True,
+                    "orig_idx": i,
+                    "item_id": item["item_id"],
+                    "item_info": item
+                })
+            for j, item in enumerate(self.stageboss_chest_queue):
+                unified.append({
+                    "time": 420 * (j + 1),
+                    "is_normal": False,
+                    "orig_idx": j,
+                    "item_id": item["item_id"],
+                    "item_info": item
+                })
+            self.unified_timeline = sorted(unified, key=lambda x: x["time"])
+            
+            # Reset baselines for the new scan/run
+            self.initial_use_list = None
+            self.collected_run_cids = set()
+            
+            self.after(0, self.update_loot_progress_ui)
         # Check if any target item is present (independent of relogger_active)
         target_found = False
         found_target_id = None
-        
         if item_indices is None:
             item_indices = [1] * len(found_item_ids)
-
         for item_id, index in zip(found_item_ids, item_indices):
-            # Skip if in ignore list
             if item_id in getattr(self, "ignored_items", []):
                 continue
-
-            # 1. Check if matches specific item targets (ALWAYS matches regardless of index)
+                
+            # 1. Check specific item targets
             if item_id in self.target_items:
+                # Reachability Check
+                is_unreachable = False
+                for idx, item in enumerate(self.stageboss_chest_queue):
+                    if item["item_id"] == item_id and item.get("is_unreachable", False):
+                        is_unreachable = True
+                        break
+                if is_unreachable:
+                    self.append_log(f"[RELOGGER] Target item ID {item_id} found, but it is UNREACHABLE. Skipping...\n")
+                    continue
                 target_found = True
                 found_target_id = item_id
                 break
-            
-            # 2. Check if matches grade targets (excluding Soulstones)
-            # Skip grade matching if chest index is greater than max_chest_index
+                
+            # 2. Check grade targets
             if index > self.max_chest_index:
                 continue
-
             info = self.get_item_info_by_id(item_id)
             if info:
                 grade = info.get("grade", "COMMON").upper()
                 if grade in self.target_grades:
-                    # Check name for "soulstone"
                     name = self.get_item_name(info, "").lower()
                     if "soulstone" in name or "soul stone" in name:
-                        # Skip this item as it is a Soulstone
                         continue
-                    
+                    # Reachability Check
+                    is_unreachable = False
+                    for idx, item in enumerate(self.stageboss_chest_queue):
+                        if item["item_id"] == item_id and item.get("is_unreachable", False):
+                            is_unreachable = True
+                            break
+                    if is_unreachable:
+                        self.append_log(f"[RELOGGER] Target grade item '{name}' is UNREACHABLE. Skipping...\n")
+                        continue
                     target_found = True
                     found_target_id = item_id
                     break
-
         # Always update the Upcoming Important Drops cards on every scan
         self.update_upcoming_drops(found_item_ids, found_target_id if target_found else None, chest_ids)
-
         if target_found:
             info = self.get_item_info_by_id(found_target_id) or {}
             name = self.get_item_name(info, "Unknown")
             grade = info.get("grade", "COMMON")
             self.dashboard_targets_found += 1
             self.dashboard_last_activity = f"Target matched: {name}"
-            
             # Update the alert banner
             self.update_dashboard_alert(name, grade, item_id=found_target_id)
             self.update_dashboard_stats()
-            
             # Send Discord Notification if enabled
             self.notify_discord_match(found_target_id, name, grade, res_type)
-            
             # Play alert sound in a separate thread so it doesn't freeze the GUI
             def play_alert():
                 if winsound:
@@ -2887,7 +2913,6 @@ class PeekerGUI(ctk.CTk):
                         winsound.Beep(1200, 300)
                         time.sleep(0.1)
             threading.Thread(target=play_alert, daemon=True).start()
-
             # Auto-launch trainer if enabled
             if self.trainer_auto_launch and self.trainer_path:
                 trainer_exe = Path(self.trainer_path)
@@ -2902,42 +2927,47 @@ class PeekerGUI(ctk.CTk):
                         self.append_log(f"[ERROR] Failed to launch trainer: {e}\n")
                 else:
                     self.append_log(f"[ERROR] Trainer not found at path: {trainer_exe}\n")
-            
             # Auto-Relogger specific actions
             if self.relogger_active:
                 if res_type == "chests":
-                    # Calcular cooldown dinâmico (paralelo)
+                    # Calculate dynamic cooldown (queue-aware)
                     wait_duration = self.pause_duration
                     try:
-                        target_idx = self.current_stage_queue.index(found_target_id)
-                        self.target_chest_index = target_idx + 1
-                        
-                        # O Grid de 50 baús corre em paralelo:
-                        # Baús 1 a 30 (índices 0 a 29) são normais (Uncommon)
-                        # Baús 31 a 50 (índices 30 a 49) são de chefe (Rare)
-                        if target_idx < 30:
-                            estimated_secs = (target_idx + 1) * self.uncommon_chest_cooldown
+                        # Find in StageBoss queue first
+                        target_idx = None
+                        is_boss_q = False
+                        for idx, item in enumerate(self.stageboss_chest_queue):
+                            if item["item_id"] == found_target_id:
+                                target_idx = idx
+                                is_boss_q = True
+                                break
+                        if target_idx is None:
+                            # Search in Normal queue
+                            for idx, item in enumerate(self.normal_chest_queue):
+                                if item["item_id"] == found_target_id:
+                                    target_idx = idx
+                                    is_boss_q = False
+                                    break
+                                    
+                        if target_idx is not None:
+                            self.target_chest_index = target_idx + 1
+                            cooldown = self.rare_chest_cooldown if is_boss_q else self.uncommon_chest_cooldown
+                            estimated_secs = (target_idx + 1) * cooldown + 120
+                            wait_duration = max(self.pause_duration, estimated_secs)
                         else:
-                            estimated_secs = (target_idx - 29) * self.rare_chest_cooldown
-                        
-                        # Adicionar 120s de margem de segurança
-                        estimated_secs += 120
-                        wait_duration = max(self.pause_duration, estimated_secs)
-                    except ValueError:
+                            self.target_chest_index = None
+                    except Exception:
                         self.target_chest_index = None
-
                     self.append_log(f"[RELOGGER] TARGET ITEM FOUND in upcoming chests: {name} (ID: {found_target_id})!\n")
                     if self.target_chest_index is not None:
                         self.append_log(f"[RELOGGER] Target is at index #{self.target_chest_index} of sequence. Estimating wait time: {wait_duration // 60}m {wait_duration % 60}s ({wait_duration}s).\n")
                     else:
                         self.append_log(f"[RELOGGER] Pausing automatic re-entry to let the game clear the stage and collect it. Will relaunch in {wait_duration} seconds.\n")
-                    
                     # Start the paused countdown timer
                     self.start_paused_countdown(wait_duration, name)
                 else:
                     # target collected (res_type is direct or synthesis), restart to search next target!
                     self.append_log(f"[RELOGGER] TARGET ITEM COLLECTED: {name} (ID: {found_target_id}) via {res_type.upper()}!\n")
-                    
                     # Cancel any pending paused countdown from a previous chest detection
                     if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
                         try:
@@ -2945,7 +2975,6 @@ class PeekerGUI(ctk.CTk):
                         except Exception:
                             pass
                         self.paused_countdown_id = None
-                    
                     # Play quick alert sound
                     def play_collect_alert():
                         if winsound:
@@ -2953,7 +2982,6 @@ class PeekerGUI(ctk.CTk):
                                 winsound.Beep(1600, 200)
                                 time.sleep(0.05)
                     threading.Thread(play_collect_alert, daemon=True).start()
-                    
                     # Wait safety delay before relogging to prevent server rollback
                     if self.relog_safety_delay > 0:
                         self.append_log(f"[RELOGGER] Waiting {self.relog_safety_delay}s anti-rollback safety delay before re-entry...\n")
@@ -2970,14 +2998,12 @@ class PeekerGUI(ctk.CTk):
         else:
             # If no target found, reset/clear the alert banner so it reflects the current scan
             self.set_dashboard_alert("Alert: No active alerts.", "info")
-            
             # Relogger specific actions when no target is found
             if self.relogger_active:
                 # If a paused countdown is already active (we found a target in chests
                 # and are waiting to collect), do NOT cancel it
                 if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
                     return
-                
                 self.lbl_bot_status.configure(
                     text="Relogger Status: ACTIVE (Logging stages...)\n[F9] to EMERGENCY STOP at any time",
                     text_color="#00FF00"
@@ -2987,7 +3013,6 @@ class PeekerGUI(ctk.CTk):
                 self.reentry_in_progress = True
                 self.append_log("[RELOGGER] Target item not found in drops. Initiating automatic re-entry...\n")
                 threading.Thread(target=self.run_reentry_clicks, daemon=True).start()
- 
     # =====================================================================
     # Auto-Relogger Click Automation
     # =====================================================================
@@ -2996,7 +3021,6 @@ class PeekerGUI(ctk.CTk):
             self.stop_relogger("Stopped by User")
         else:
             self.start_relogger()
- 
     def start_relogger(self) -> None:
         if self.relogger_method == "mouse_clicks":
             # Check coordinates calibration
@@ -3016,11 +3040,9 @@ class PeekerGUI(ctk.CTk):
             if not self.game_path or not os.path.exists(self.game_path):
                 self.append_log(f"[ERROR] Cannot start relogger. TaskbarHero.exe not found at path: {self.game_path}\n")
                 return
- 
         if not self.proxy_running:
             self.append_log("[ERROR] Please start the Peeker Proxy before running the relogger.\n")
             return
- 
         self.relogger_active = True
         self.btn_bot.configure(text="Stop Auto-Relogger", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER)
         self.lbl_bot_status.configure(
@@ -3028,12 +3050,10 @@ class PeekerGUI(ctk.CTk):
             text_color="#00FF00"
         )
         self.append_log(f"[RELOGGER] Auto-Relogger enabled ({'Process Restart' if self.relogger_method == 'process_restart' else 'Mouse Clicks'}). Checking upcoming drops...\n")
- 
         if self.relogger_method == "process_restart":
             self.last_launch_time = 0
             self.watchdog_token += 1
             threading.Thread(target=self.relogger_watchdog_loop, args=(self.watchdog_token,), daemon=True).start()
- 
         # Evaluate last loaded drops immediately if they exist
         if self.last_found_item_ids:
             self.append_log("[RELOGGER] Evaluating currently loaded stage drops immediately...\n")
@@ -3043,7 +3063,6 @@ class PeekerGUI(ctk.CTk):
                 self.last_found_item_indices,
                 getattr(self, 'last_found_chest_ids', None)
             )
- 
     def stop_relogger(self, reason: str = "") -> None:
         self.relogger_active = False
         self.last_found_item_ids = []
@@ -3051,7 +3070,6 @@ class PeekerGUI(ctk.CTk):
         self.last_found_chest_ids = []
         self.last_found_res_type = "chests"
         self.reentry_in_progress = False
-        
         # Cancel countdown if active
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
             try:
@@ -3059,10 +3077,8 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 pass
             self.paused_countdown_id = None
- 
         # Hide the collected button
         self.btn_item_collected.pack_forget()
- 
         self.btn_bot.configure(text="Start Auto-Relogger", fg_color="#2ecc71", hover_color="#27ae60")
         self.lbl_bot_status.configure(
             text="Relogger Status: Inactive\n[F9] to EMERGENCY STOP at any time",
@@ -3072,11 +3088,9 @@ class PeekerGUI(ctk.CTk):
         self.append_log(f"[RELOGGER] Auto-Relogger disabled{reason_str}.\n")
         if winsound:
             winsound.Beep(400, 250)
- 
     def skip_to_safety_relog(self) -> None:
         """User clicked 'Item Collected' — cancel long countdown, apply safety delay, then relog."""
         self.append_log("[RELOGGER] User confirmed item collected!\n")
-        
         # Cancel the long countdown
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
             try:
@@ -3084,10 +3098,8 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 pass
             self.paused_countdown_id = None
-        
         # Hide the collected button
         self.btn_item_collected.pack_forget()
-        
         # Apply safety delay before relogging
         if self.relog_safety_delay > 0:
             self.safety_countdown_active = True
@@ -3096,7 +3108,6 @@ class PeekerGUI(ctk.CTk):
         else:
             self.append_log("[RELOGGER] Safety delay = 0, relogging immediately...\n")
             self.force_relaunch_game()
- 
     def force_relaunch_game(self) -> None:
         self.append_log("[RELOGGER] Force Relaunch requested by user...\n")
         self.last_found_item_ids = []
@@ -3104,7 +3115,6 @@ class PeekerGUI(ctk.CTk):
         self.last_found_chest_ids = []
         self.last_found_res_type = "chests"
         self.reentry_in_progress = False
-        
         # Cancel countdown if active
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
             try:
@@ -3112,17 +3122,14 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 pass
             self.paused_countdown_id = None
-        
         # Hide the collected button
         self.btn_item_collected.pack_forget()
         self.safety_countdown_active = False
-        
         if self.relogger_active:
             self.lbl_bot_status.configure(
                 text="Relogger Status: ACTIVE (Logging stages...)\n[F9] to EMERGENCY STOP at any time",
                 text_color="#00FF00"
             )
-            
         # Kill the game process and trainer
         self.append_log("[RELOGGER] Terminating TaskbarHero.exe...\n")
         try:
@@ -3134,9 +3141,7 @@ class PeekerGUI(ctk.CTk):
             self._kill_trainer_elevated()
         except Exception as e:
             self.append_log(f"[ERROR] Failed to kill process: {e}\n")
-            
         self.last_launch_time = 0
-        
         # If relogger is not active, launch the game manually
         if not self.relogger_active:
             try:
@@ -3148,7 +3153,6 @@ class PeekerGUI(ctk.CTk):
                     os.startfile(self.game_path)
             except Exception as e:
                 self.append_log(f"[ERROR] Failed to launch game: {e}\n")
- 
     def start_paused_countdown(self, seconds_left: int, item_name: str) -> None:
         # Cancel any existing countdown first
         if hasattr(self, 'paused_countdown_id') and self.paused_countdown_id:
@@ -3157,16 +3161,13 @@ class PeekerGUI(ctk.CTk):
             except Exception:
                 pass
             self.paused_countdown_id = None
- 
         if not self.relogger_active:
             return
- 
         if seconds_left <= 0:
             self.append_log(f"[RELOGGER] Countdown finished. Auto-relaunching game now...\n")
             self.btn_item_collected.pack_forget()
             self.force_relaunch_game()
             return
- 
         # Show the "Item Collected" button so user can skip the long countdown
         # (only during the main wait, not during safety countdown)
         if not self.safety_countdown_active:
@@ -3175,18 +3176,20 @@ class PeekerGUI(ctk.CTk):
                 self.btn_item_collected.pack(fill="x", padx=15, pady=(0, 8), before=self.lbl_bot_status)
             except Exception:
                 pass
- 
+        hours = seconds_left // 3600
+        minutes = (seconds_left % 3600) // 60
+        secs = seconds_left % 60
+        time_str = f"{hours:02d}:{minutes:02d}:{secs:02d}"
+        
         self.lbl_bot_status.configure(
-            text=f"Relogger Status: ACTIVE (PAUSED - Found {item_name})\nRelaunching game in {seconds_left}s...",
+            text=f"Relogger Status: ACTIVE (PAUSED - Found {item_name})\nRelaunching game in {time_str}...",
             text_color="#f1c40f"
         )
-        
         # Schedule the next tick
         self.paused_countdown_id = self.after(
             1000, 
             lambda: self.start_paused_countdown(seconds_left - 1, item_name)
         )
- 
     def _kill_trainer_elevated(self) -> None:
         """Kill TBH Trainer.exe even when it runs as Admin."""
         try:
@@ -3204,7 +3207,6 @@ class PeekerGUI(ctk.CTk):
                         ctypes.windll.kernel32.CloseHandle(handle)
         except Exception:
             pass
- 
     def run_reentry_clicks(self) -> None:
         """Fires simulated mouse clicks or restarts process to exit and re-enter stage."""
         try:
@@ -3214,7 +3216,6 @@ class PeekerGUI(ctk.CTk):
                 pre_kill_delay = random.uniform(2.0, 4.0)
                 time.sleep(pre_kill_delay)
                 if not self.relogger_active: return
-                
                  # 1. Kill TaskbarHero.exe and TBH Trainer.exe
                 self.append_log("[RELOGGER] Terminating TaskbarHero.exe...\n")
                 try:
@@ -3227,50 +3228,42 @@ class PeekerGUI(ctk.CTk):
                     self._kill_trainer_elevated()
                 except Exception as e:
                     self.append_log(f"[WARNING] Failed to kill process: {e}\n")
-                
                 # Clear cached drops so they are not evaluated on next startup
                 self.last_found_item_ids = []
                 self.last_found_item_indices = []
                 self.last_found_chest_ids = []
                 self.last_found_res_type = "chests"
- 
                 # Add a randomized cooldown delay before launching again to avoid bot pattern detection
                 post_kill_delay = random.uniform(4.0, 8.0)
                 self.append_log(f"[RELOGGER] Safety cooldown of {post_kill_delay:.1f}s before next launch...\n")
                 self.last_launch_time = time.time() - (20.0 - post_kill_delay)
-                
             else:
                 # 1. Wait for game loading / stable screen
                 time.sleep(1.2)
                 if not self.relogger_active: return
- 
                 # 2. Click Menu Button
                 self.append_log("[RELOGGER] Clicking Menu...\n")
                 self.click_coordinate("menu")
                 time.sleep(0.6)
                 if not self.relogger_active: return
- 
                 # 3. Click Back to Title / Logout
                 self.append_log("[RELOGGER] Clicking Back to Title...\n")
                 self.click_coordinate("exit")
                 # Wait for game to return to title screen (takes longer)
                 time.sleep(3.0)
                 if not self.relogger_active: return
- 
                 # 4. Click Tap to Start / Login
                 self.append_log("[RELOGGER] Clicking Tap to Start / Login...\n")
                 self.click_coordinate("stage_icon")
                 # Wait for game to load main screen / world map
                 time.sleep(4.0)
                 if not self.relogger_active: return
- 
                 # 5. Click Enter Stage
                 self.append_log("[RELOGGER] Clicking Enter Stage...\n")
                 self.click_coordinate("confirm_enter")
                 self.append_log("[RELOGGER] Waiting for stage load...\n")
         finally:
             self.reentry_in_progress = False
- 
     def relogger_watchdog_loop(self, token: int) -> None:
         """Watchdog loop to ensure the game is always running when the relogger is active."""
         self.append_log("[RELOGGER] Watchdog loop started.\n")
@@ -3287,7 +3280,6 @@ class PeekerGUI(ctk.CTk):
                 running = "taskbarhero.exe" in p.stdout.lower()
             except Exception:
                 pass
-            
             if not running:
                 current_time = time.time()
                 # Only launch if we haven't launched in the last 20 seconds to allow Steam to load
@@ -3302,32 +3294,391 @@ class PeekerGUI(ctk.CTk):
                         self.last_launch_time = current_time
                     except Exception as e:
                         self.append_log(f"[WATCHDOG] Failed to launch game: {e}\n")
-            
             time.sleep(3.0)
- 
     def click_coordinate(self, key: str) -> None:
         pos = self.coords.get(key)
         if not pos:
             return
         x, y = pos[0], pos[1]
-        
         # Set cursor and left mouse click down/up
         ctypes.windll.user32.SetCursorPos(x, y)
         time.sleep(0.02)
         ctypes.windll.user32.mouse_event(2, 0, 0, 0, 0) # mouse left down
         time.sleep(0.05)
         ctypes.windll.user32.mouse_event(4, 0, 0, 0, 0) # mouse left up
- 
     # Safe exit cleanup
     def destroy(self) -> None:
         self.stop_relogger()
         self.stop_proxy()
         super().destroy()
- 
+    def on_save_path_typed(self, event: Any) -> None:
+        self.save_file_path = self.entry_save_path.get().strip()
+        self.save_peeker_config()
+        self.initialize_save_tracking()
+    def browse_save_path(self) -> None:
+        from tkinter import filedialog
+        path = filedialog.askopenfilename(
+            title="Select SaveFile_Live.es3",
+            filetypes=[("ES3 Save Files", "*.es3"), ("All Files", "*.*")]
+        )
+        if path:
+            self.save_file_path = os.path.normpath(path)
+            self.entry_save_path.delete(0, "end")
+            self.entry_save_path.insert(0, self.save_file_path)
+            self.save_peeker_config()
+            self.append_log(f"[CONFIG] Save file path updated to: {self.save_file_path}\n")
+            self.initialize_save_tracking()
+    def decrypt_es3_file(self, file_path: str, password: str) -> dict | None:
+        import time
+        from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
+        from cryptography.hazmat.primitives import hashes
+        from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+        from cryptography.hazmat.backends import default_backend
+        for attempt in range(5):
+            try:
+                if not os.path.exists(file_path):
+                    return None
+                with open(file_path, "rb") as f:
+                    data = f.read()
+                if len(data) < 32:
+                    return None
+                iv = data[:16]
+                ciphertext = data[16:]
+                kdf = PBKDF2HMAC(
+                    algorithm=hashes.SHA1(),
+                    length=16,
+                    salt=iv,
+                    iterations=100,
+                    backend=default_backend()
+                )
+                key = kdf.derive(password.encode('utf-8'))
+                cipher = Cipher(algorithms.AES(key), modes.CBC(iv), backend=default_backend())
+                decryptor = cipher.decryptor()
+                decrypted_bytes = decryptor.update(ciphertext) + decryptor.finalize()
+                pad_len = decrypted_bytes[-1]
+                if 1 <= pad_len <= 16:
+                    decrypted_bytes = decrypted_bytes[:-pad_len]
+                decrypted_text = decrypted_bytes.decode('utf-8', errors='ignore')
+                return json.loads(decrypted_text)
+            except PermissionError:
+                # File is locked, wait 100ms and retry
+                time.sleep(0.1)
+                continue
+            except Exception as e:
+                self.log_gui_error(f"Error decrypting save file: {e}")
+                return None
+        return None
+    def initialize_save_tracking(self) -> None:
+        self.seen_get_chest_ids = set()
+        self.seen_use_chest_ids = set()
+        self.chest_id_to_drop_map = {}
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.unified_timeline = []
+        self.initial_use_list = None
+        self.collected_run_cids = set()
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.seen_use_chest_ids = set()
+        self.chest_id_to_drop_map = {}
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.unified_timeline = []
+        self.initial_use_list = None
+        self.collected_run_cids = set()
+        self.seen_inventory_item_ids = set()
+        self.stageboss_chest_queue = []
+        self.normal_chest_queue = []
+        self.stageboss_progress_widgets = []
+        self.normal_progress_widgets = []
+        self.stageboss_chest_dropped_this_run = False
+        self.seen_use_chest_ids = set()
+        self.chest_id_to_drop_map = {}
+        self.boss_chests_in_slots = 0
+        self.boss_chest_dropped_this_run = False
+        self.last_stage_wave = 0
+        self.unified_timeline = []
+        self.initial_use_list = None
+        self.collected_run_cids = set()
+        self.last_save_mtime = 0
+        if self.save_file_path and os.path.exists(self.save_file_path):
+            try:
+                save_data = self.decrypt_es3_file(self.save_file_path, "emuMqG3bLYJ938ZDCfieWJ")
+                if save_data:
+                    player_save_str = save_data.get("PlayerSaveData", {}).get("value", "")
+                    if player_save_str:
+                        player_data = json.loads(player_save_str)
+                        get_list = player_data.get("BoxBucketGetBoxList", [])
+                        use_list = player_data.get("BoxBucketUseBoxList", [])
+                        items = player_data.get("itemSaveDatas", [])
+                        for cid in get_list:
+                            self.seen_get_chest_ids.add(str(cid))
+                        for cid in use_list:
+                            self.seen_use_chest_ids.add(str(cid))
+                        for item in items:
+                            uid = item.get("UniqueId")
+                            if uid:
+                                self.seen_inventory_item_ids.add(str(uid))
+                        self.last_save_mtime = os.path.getmtime(self.save_file_path)
+                        self.append_log(f"[SAVE WATCH] Tracking initialized. Seen Get: {len(self.seen_get_chest_ids)}, Use: {len(self.seen_use_chest_ids)} chests, Items: {len(self.seen_inventory_item_ids)}.\n")
+            except Exception as e:
+                self.append_log(f"[SAVE WATCH] Initialization failed: {e}\n")
+    def update_widget_collected(self, w) -> None:
+        w["lbl_status"].configure(text="[✔️]", text_color="#2ecc71")
+        w["lbl_name"].configure(text_color="#7f8c8d")
+        w["card"].configure(border_width=1, border_color="#2c3e50")
+        
+    def update_widget_dropped(self, w) -> None:
+        w["lbl_status"].configure(text="[📦]", text_color=COLOR_PRIMARY)
+        w["lbl_name"].configure(text_color=w.get("color", COLOR_TEXT))
+        w["card"].configure(border_width=1, border_color=COLOR_PRIMARY)
+        
+    def update_widget_pending(self, w) -> None:
+        w["lbl_status"].configure(text="[  ]", text_color=COLOR_MUTED)
+        w["lbl_name"].configure(text_color=w.get("color", COLOR_TEXT))
+        w["card"].configure(border_width=0)
+    def start_save_watcher(self) -> None:
+        self.initialize_save_tracking()
+        def watcher_loop():
+            while getattr(self, "running", True):
+                time.sleep(0.5)
+                if not self.save_file_path or not os.path.exists(self.save_file_path):
+                    continue
+                try:
+                    mtime = os.path.getmtime(self.save_file_path)
+                    if mtime != self.last_save_mtime:
+                        save_data = self.decrypt_es3_file(self.save_file_path, "emuMqG3bLYJ938ZDCfieWJ")
+                        if not save_data:
+                            self.last_save_mtime = mtime
+                            continue
+                            
+                        player_save_str = save_data.get("PlayerSaveData", {}).get("value", "")
+                        if not player_save_str:
+                            self.last_save_mtime = mtime
+                            continue
+                            
+                        player_data = json.loads(player_save_str)
+                        get_list = [str(cid) for cid in player_data.get("BoxBucketGetBoxList", [])]
+                        use_list = [str(cid) for cid in player_data.get("BoxBucketUseBoxList", [])]
+                        items = player_data.get("itemSaveDatas", [])
+                        
+                        # Account/character switch recovery
+                        new_chests_count = len([cid for cid in get_list if cid not in self.seen_get_chest_ids])
+                        new_items_count = len([item.get("UniqueId") for item in items if str(item.get("UniqueId")) not in self.seen_inventory_item_ids])
+                        if new_chests_count > 3 or new_items_count > 10:
+                            self.after(0, self.initialize_save_tracking)
+                            self.last_save_mtime = mtime
+                            continue
+                            
+                        # Update seen sets to prevent false account switch recovery triggering
+                        self.seen_get_chest_ids.update(get_list)
+                        self.seen_use_chest_ids.update(use_list)
+                            
+                        # Reset drop flags on stage/wave restarts (Do NOT reset baseline to preserve historical checks)
+                        wave = player_data.get("commonSaveData", {}).get("currentStageWave", 0)
+                        if wave == 0 and getattr(self, "last_stage_wave", 0) > 0:
+                            self.boss_chest_dropped_this_run = False
+                        self.last_stage_wave = wave
+                        # Initialize run baselines if not already set
+                        if self.initial_use_list is None:
+                            self.initial_use_list = set(use_list)
+                            self.collected_run_cids = set()
+                            self.chest_id_to_type_map = {}
+                            self.append_log(f"[SAVE WATCH] Baseline set: {len(get_list)} in slots, {len(self.initial_use_list)} opened.\n")
+                            self.last_save_mtime = mtime
+                            continue
+                            
+                        # Calculate active and opened chest IDs for the current session (not filtered by get_list baseline)
+                        current_run_get = list(get_list)
+                        current_run_use = [cid for cid in use_list if cid not in self.initial_use_list]
+                        current_run_all = list(set(current_run_get + current_run_use))
+                        
+                        # Classify new chest drops/openings using itemSaveDatas and next pending items
+                        new_get_unclassified = [cid for cid in current_run_get if cid not in self.chest_id_to_type_map]
+                        if new_get_unclassified:
+                            for cid in new_get_unclassified:
+                                for item in items:
+                                    uid = item.get("UniqueId")
+                                    if uid and str(uid) == cid:
+                                        item_key = item.get("ItemKey")
+                                        if item_key:
+                                            is_boss = str(item_key).startswith("92") or str(item_key).startswith("93")
+                                            self.chest_id_to_type_map[cid] = "boss" if is_boss else "normal"
+                                            break
+                            rem_get = [cid for cid in new_get_unclassified if cid not in self.chest_id_to_type_map]
+                            if rem_get:
+                                rem_get.sort(key=int)
+                                wave = player_data.get("commonSaveData", {}).get("currentStageWave", 0)
+                                if wave == 0:
+                                    self.chest_id_to_type_map[rem_get[0]] = "boss"
+                                    for cid in rem_get[1:]:
+                                        self.chest_id_to_type_map[cid] = "normal"
+                                else:
+                                    for cid in rem_get:
+                                        self.chest_id_to_type_map[cid] = "normal"
+                                        
+                        new_use_unclassified = [cid for cid in current_run_use if cid not in self.chest_id_to_type_map]
+                        if new_use_unclassified:
+                            new_use_unclassified.sort(key=int)
+                            boss_assigned = False
+                            
+                            # Check new items for item-driven classification
+                            new_items = []
+                            for item in items:
+                                uid = item.get("UniqueId")
+                                if uid and str(uid) not in self.seen_inventory_item_ids:
+                                    item_key = item.get("ItemKey")
+                                    if item_key and not str(item_key).startswith(("91", "92", "93")):
+                                        new_items.append(item_key)
+                                        
+                            for cid in new_use_unclassified:
+                                classified = False
+                                for k in new_items:
+                                    # Search in StageBoss queue first (Boss items are more unique)
+                                    for search_idx in range(len(self.stageboss_chest_queue)):
+                                        if self.stageboss_progress_widgets[search_idx]["lbl_status"].cget("text") != "[✔️]" and self.stageboss_chest_queue[search_idx]["item_id"] == k:
+                                            self.chest_id_to_type_map[cid] = "boss"
+                                            classified = True
+                                            boss_assigned = True
+                                            break
+                                    if classified:
+                                        break
+                                        
+                                    # Search in Normal queue
+                                    for search_idx in range(len(self.normal_chest_queue)):
+                                        if self.normal_progress_widgets[search_idx]["lbl_status"].cget("text") != "[✔️]" and self.normal_chest_queue[search_idx]["item_id"] == k:
+                                            self.chest_id_to_type_map[cid] = "normal"
+                                            classified = True
+                                            break
+                                    if classified:
+                                        break
+                                        
+                            rem_use = [cid for cid in new_use_unclassified if cid not in self.chest_id_to_type_map]
+                            if rem_use:
+                                wave = player_data.get("commonSaveData", {}).get("currentStageWave", 0)
+                                if wave == 0:
+                                    if not boss_assigned:
+                                        self.chest_id_to_type_map[rem_use[0]] = "boss"
+                                        for cid in rem_use[1:]:
+                                            self.chest_id_to_type_map[cid] = "normal"
+                                    else:
+                                        for cid in rem_use:
+                                            self.chest_id_to_type_map[cid] = "normal"
+                                else:
+                                    for cid in rem_use:
+                                        self.chest_id_to_type_map[cid] = "normal"
+                                        
+                        # Separate active and opened IDs by classification
+                        boss_cids = sorted([cid for cid in current_run_all if self.chest_id_to_type_map.get(cid) == "boss"], key=int)
+                        normal_cids = sorted([cid for cid in current_run_all if self.chest_id_to_type_map.get(cid) == "normal"], key=int)
+                        
+                        # Real-time residual cooldown tracking
+                        if not hasattr(self, "tracked_timestamp_boss_cids"): self.tracked_timestamp_boss_cids = set()
+                        if not hasattr(self, "tracked_timestamp_normal_cids"): self.tracked_timestamp_normal_cids = set()
+                        
+                        new_boss_chests = [cid for cid in boss_cids if cid not in self.tracked_timestamp_boss_cids]
+                        if new_boss_chests:
+                            self.last_boss_drop_time = time.time()
+                            self.tracked_timestamp_boss_cids.update(new_boss_chests)
+                            
+                        new_normal_chests = [cid for cid in normal_cids if cid not in self.tracked_timestamp_normal_cids]
+                        if new_normal_chests:
+                            self.last_normal_drop_time = time.time()
+                            self.tracked_timestamp_normal_cids.update(new_normal_chests)
+                        
+                        expected_items_from_chests = set()
+                        
+                        # 1. Update StageBoss Column (Direct index-to-index mapping)
+                        for idx, item in enumerate(self.stageboss_chest_queue):
+                            widgets_ref = self.stageboss_progress_widgets
+                            if idx < len(boss_cids):
+                                cid = boss_cids[idx]
+                                is_opened = cid in current_run_use
+                                if is_opened:
+                                    self.after(0, lambda w=widgets_ref[idx]: self.update_widget_collected(w))
+                                    if cid not in self.collected_run_cids:
+                                        self.collected_run_cids.add(cid)
+                                        expected_items_from_chests.add(item["item_id"])
+                                        
+                                        info = self.get_item_info_by_id(item["item_id"]) or {}
+                                        name = self.get_item_name(info, f"Item ({item['item_id']})")
+                                        self.append_log(f"[SAVE] 🔓 Collected: {name} (StageBoss Chest ...{cid[-6:]})\n")
+                                        
+                                        if item["item_id"] in self.target_items:
+                                            self.append_log(f"[SAVE WATCH] 🎯 TARGET ITEM COLLECTED! Relog safety delay activating...\n")
+                                            self.skip_to_safety_relog()
+                                else:
+                                    self.after(0, lambda w=widgets_ref[idx]: self.update_widget_dropped(w))
+                            else:
+                                self.after(0, lambda w=widgets_ref[idx]: self.update_widget_pending(w))
+                                
+                        # 2. Update Normal Column (Direct index-to-index mapping)
+                        for idx, item in enumerate(self.normal_chest_queue):
+                            widgets_ref = self.normal_progress_widgets
+                            if idx < len(normal_cids):
+                                cid = normal_cids[idx]
+                                is_opened = cid in current_run_use
+                                if is_opened:
+                                    self.after(0, lambda w=widgets_ref[idx]: self.update_widget_collected(w))
+                                    if cid not in self.collected_run_cids:
+                                        self.collected_run_cids.add(cid)
+                                        expected_items_from_chests.add(item["item_id"])
+                                        
+                                        info = self.get_item_info_by_id(item["item_id"]) or {}
+                                        name = self.get_item_name(info, f"Item ({item['item_id']})")
+                                        self.append_log(f"[SAVE] 🔓 Collected: {name} (Normal Chest ...{cid[-6:]})\n")
+                                        
+                                        if item["item_id"] in self.target_items:
+                                            self.append_log(f"[SAVE WATCH] 🎯 TARGET ITEM COLLECTED! Relog safety delay activating...\n")
+                                            self.skip_to_safety_relog()
+                                else:
+                                    self.after(0, lambda w=widgets_ref[idx]: self.update_widget_dropped(w))
+                            else:
+                                self.after(0, lambda w=widgets_ref[idx]: self.update_widget_pending(w))
+                                
+                        # Check for direct inventory additions
+                        new_items = []
+                        for item in items:
+                            uid = item.get("UniqueId")
+                            if uid:
+                                uid_str = str(uid)
+                                if uid_str not in self.seen_inventory_item_ids:
+                                    self.seen_inventory_item_ids.add(uid_str)
+                                    item_key = item.get("ItemKey")
+                                    if item_key:
+                                        if not str(item_key).startswith(("91", "92", "93")):
+                                            new_items.append(item_key)
+                                            
+                        # Log direct acquisitions (Cube, offering, etc.)
+                        for k in new_items:
+                            if k in expected_items_from_chests:
+                                expected_items_from_chests.remove(k)
+                            else:
+                                self.after(0, lambda item_key=k: self.handle_direct_item_acquired(item_key))
+                                
+                        self.last_save_mtime = mtime
+                except Exception as e:
+                    self.append_log(f"[SAVE WATCH] Loop error: {e}\n")
+                    
+        import threading
+        t = threading.Thread(target=watcher_loop, daemon=True)
+        t.start()
+    def handle_direct_item_acquired(self, item_key: int) -> None:
+        info = self.get_item_info_by_id(item_key) or {}
+        name = self.get_item_name(info, f"Item ({item_key})")
+        self.append_log(f"[SAVE] 👑 Obtained: {name} (Direct/Synthesis/Offering)\n")
+        
+        # Check target item targets (safety net)
+        if item_key in self.target_items:
+            self.append_log(f"[SAVE WATCH] 🎯 TARGET ITEM DETECTED in inventory! Relog safety delay activating...\n")
+            self.skip_to_safety_relog()
     def on_closing(self) -> None:
+        self.running = False
         self.stop_proxy()
         self.destroy()
- 
 # =====================================================================
 # Main execution entry
 # =====================================================================
@@ -3335,7 +3686,6 @@ if __name__ == "__main__":
     # Ensure Windows console supports colors just in case
     if os.name == 'nt':
         os.system('color')
-        
     app = PeekerGUI()
     try:
         app.mainloop()

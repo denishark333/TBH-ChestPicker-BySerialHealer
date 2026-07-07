@@ -241,18 +241,89 @@ class ChestPeekerHook:
                         direct_drops_found.append(item_id)
  
         if chests_found:
-            print("\n" + "="*80)
-            print(f"{C_BOLD}{C_CYAN}[PEEKER] DETECTED UPCOMING CHEST DROPS (Original, Unmodified){C_RESET}")
-            print("="*80)
+            left_list = []
+            right_list = []
+            
             for idx, (chest_id, reward_id) in enumerate(chests_found, 1):
-                chest_str = get_item_display(chest_id, colored=False)
-                reward_str = get_item_display(reward_id)
-                print(f" {C_BOLD}{idx}.{C_RESET} Chest: {chest_str}")
-                print(f"    └─ Drop: {reward_str}")
-            print("="*80 + "\n")
+                c_info = get_item_info(chest_id) or {}
+                r_info = get_item_info(reward_id) or {}
+                
+                name_dict = c_info.get("name")
+                c_name = name_dict.get("en-US", name_dict.get("en", "Unknown Chest")) if isinstance(name_dict, dict) else "Unknown Chest"
+                
+                name_dict = r_info.get("name")
+                r_name = name_dict.get("en-US", name_dict.get("en", "Unknown Reward")) if isinstance(name_dict, dict) else "Unknown Reward"
+                
+                r_grade = r_info.get("grade", "COMMON")
+                c_grade = c_info.get("grade", "COMMON")
+                
+                is_boss_chest = "stageboss" in c_name.lower()
+                if is_boss_chest:
+                    c_grade = "BOSS"
+                
+                item_data = {
+                    "idx": idx,
+                    "c_name": c_name,
+                    "c_grade": c_grade,
+                    "r_name": r_name,
+                    "r_grade": r_grade
+                }
+                
+                if is_boss_chest:
+                    left_list.append(item_data)
+                else:
+                    right_list.append(item_data)
+
+            # Render side-by-side columns
+            col_width = 56
+            print("\n" + "=" * 115)
+            print(f"                               {C_BOLD}{C_CYAN}[PEEKER] DETECTED UPCOMING CHEST DROPS (Original, Unmodified){C_RESET}")
+            print("=" * 115)
+            
+            header_left = " StageBoss Chests (Raros)"
+            header_right = " Normal Chests (Uncommon)"
+            divider = " │ "
+            print(header_left.ljust(col_width) + divider + header_right)
+            print("-" * col_width + "┼" + "-" * 56)
+            
+            def format_col_chest(item: dict | None, local_idx: int, width: int) -> str:
+                if not item:
+                    return " " * width
+                lbl = f" [{local_idx}] Chest: "
+                val_plain = f"{item['c_name']} [{item['c_grade']}]"
+                color = get_grade_color(item['c_grade'])
+                val_colored = f"{color}{item['c_name']} [{item['c_grade']}]{C_RESET}"
+                pad_len = width - (len(lbl) + len(val_plain))
+                if pad_len < 0:
+                    pad_len = 0
+                return lbl + val_colored + (" " * pad_len)
+
+            def format_col_drop(item: dict | None, width: int) -> str:
+                if not item:
+                    return " " * width
+                lbl = "   └─ Drop: "
+                val_plain = f"{item['r_name']} [{item['r_grade']}]"
+                color = get_grade_color(item['r_grade'])
+                val_colored = f"{color}{item['r_name']} [{item['r_grade']}]{C_RESET}"
+                pad_len = width - (len(lbl) + len(val_plain))
+                if pad_len < 0:
+                    pad_len = 0
+                return lbl + val_colored + (" " * pad_len)
+
+            num_rows = max(len(left_list), len(right_list))
+            for i in range(num_rows):
+                left_item = left_list[i] if i < len(left_list) else None
+                right_item = right_list[i] if i < len(right_list) else None
+                
+                # Print Chest Info Row
+                print(format_col_chest(left_item, i + 1, col_width) + divider + format_col_chest(right_item, i + 1, col_width))
+                # Print Drop Info Row
+                print(format_col_drop(left_item, col_width) + divider + format_col_drop(right_item, col_width))
+                
+            print("=" * 115 + "\n")
             print(f"__PEEK_RESULT__:chests:{json.dumps(chests_found)}", flush=True)
  
-        if direct_drops_found and not is_offering:
+        if direct_drops_found and not chests_found and not is_offering:
             print("\n" + "="*80)
             print(f"{C_BOLD}{C_GREEN}[PEEKER] DETECTED STAGE CLEAR / BOSS REWARDS (Hadiah Selesai Stage){C_RESET}")
             print("="*80)
