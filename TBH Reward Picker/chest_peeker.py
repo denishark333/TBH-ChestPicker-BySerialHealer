@@ -225,26 +225,58 @@ class ChestPeekerHook:
         chests_found = []
         direct_drops_found = []
         
-        OBJECT_RE = re.compile(r'\{([^{}]+)\}')
-        for obj_match in OBJECT_RE.finditer(body):
-            obj_content = obj_match.group(1)
-            item_match = ITEM_FIELD_RE.search(obj_content)
-            reward_match = REWARD_FIELD_RE.search(obj_content)
-            
-            if item_match:
-                item_id = int(item_match.group("item_id"))
-                if reward_match:
-                    reward_id = int(reward_match.group("reward_id"))
-                    chests_found.append((item_id, reward_id))
-                else:
-                    if get_item_info(item_id) and item_id not in direct_drops_found:
-                        direct_drops_found.append(item_id)
+        parsed_json = False
+        try:
+            data = json.loads(body)
+            if "result" in data and isinstance(data["result"], str):
+                inner = json.loads(data["result"])
+            else:
+                inner = data
+                
+            boxes = inner.get("data", {}).get("boxes", [])
+            for box in boxes:
+                item_id = box.get("itemId")
+                reward_id = box.get("rewardItemId")
+                item_key = box.get("itemKey")
+                if item_id and reward_id and item_key:
+                    chests_found.append((int(item_id), int(reward_id), str(item_key)))
+                    
+            direct_items = inner.get("data", {}).get("added", [])
+            for item in direct_items:
+                item_id = item.get("itemId")
+                if item_id and get_item_info(int(item_id)) and int(item_id) not in direct_drops_found:
+                    direct_drops_found.append(int(item_id))
+            parsed_json = True
+        except Exception:
+            pass
+
+        if not parsed_json:
+            OBJECT_RE = re.compile(r'\{([^{}]+)\}')
+            for obj_match in OBJECT_RE.finditer(body):
+                obj_content = obj_match.group(1)
+                item_match = ITEM_FIELD_RE.search(obj_content)
+                reward_match = REWARD_FIELD_RE.search(obj_content)
+                
+                if item_match:
+                    item_id = int(item_match.group("item_id"))
+                    if reward_match:
+                        reward_id = int(reward_match.group("reward_id"))
+                        chests_found.append((item_id, reward_id, "fallback"))
+                    else:
+                        if get_item_info(item_id) and item_id not in direct_drops_found:
+                            direct_drops_found.append(item_id)
  
         if chests_found:
+            try:
+                with open(ROOT / "payload_dump.json", "w", encoding="utf-8") as f:
+                    f.write(body)
+            except Exception:
+                pass
+                
             left_list = []
             right_list = []
             
-            for idx, (chest_id, reward_id) in enumerate(chests_found, 1):
+            for idx, (chest_id, reward_id, item_key) in enumerate(chests_found, 1):
                 c_info = get_item_info(chest_id) or {}
                 r_info = get_item_info(reward_id) or {}
                 
@@ -361,8 +393,8 @@ class ChestPeekerHook:
         if all_seen_ids:
             body_lower = body.lower()
             if "added" in body_lower or "reward" in body_lower:
-                chest_reward_ids = set(r for _, r in chests_found)
-                chest_box_ids = set(c for c, _ in chests_found)
+                chest_reward_ids = set(r for _, r, _ in chests_found)
+                chest_box_ids = set(c for c, _, _ in chests_found)
                 direct_ids = set(direct_drops_found)
                 new_seen = all_seen_ids - chest_reward_ids - chest_box_ids - direct_ids
                 if new_seen:

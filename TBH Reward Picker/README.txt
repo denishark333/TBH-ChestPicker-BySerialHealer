@@ -26,24 +26,8 @@ Como Funciona o Fluxo de Uso (Tudo pela GUI):
 3. Abra o jogo TaskbarHero e mude de fase (ou entre em um estágio) para registrar o peeker.
 4. A partir desse momento, os scans começarão a ser detectados e exibidos em tempo real na interface!
 
-AVISO CRÍTICO DE CONEXÃO (PROXY):
-- Sempre clique em "Stop Peeker Proxy" na interface antes de fechar o programa.
-- Como o painel intercepta o tráfego da rede, se você fechar o programa bruscamente com o proxy ligado (ou tiver uma conexão instável), a internet do seu Windows vai parar de funcionar! 
-- Se você esquecer e perder a internet, basta abrir o painel novamente, ligar o proxy e desligar em seguida. (Ou reiniciar o computador).
 
-
-Novidades da Versão Recente (Arquitetura Matemática & Auto-Relogger):
-
-- Matemática Absoluta (Alcance Dinâmico):
-  * O cálculo de itens "Inalcançáveis" deixou de ser uma fórmula estática limitadora.
-  * O painel agora usa "Extrapolação de Cooldown Residual em Tempo Real". Ele anota exatamente o milissegundo em que cada baú cai e projeta o futuro com 100% de precisão física.
-  * Baús atrasados que seriam descartados agora são marcados como alcançáveis caso o estágio possua "crédito de tempo" suficiente.
-
-- Mapeamento de Baús Independente:
-  * Remoção completa da falha de "LIFO" (Last-In-First-Out) na hora de abrir os baús. O painel não exige mais que você abra os baús na ordem em que caíram. Você pode cruzar a abertura dos baús de forma irrestrita.
-
-- Auto-Relogger Inteligente:
-  * Ele respeita totalmente a nova matemática, caçando automaticamente Targets e Itens Importantes e ignorando imediatamente "Sementes Mortas" onde o item desejado caiu na área inalcançável.
+Novidades da Versão Recente (Integração Steam Market & Cores):
 
 - Integração com a Steam Market (Preços em tempo real):
   * O painel agora busca em tempo real o último valor registrado dos itens na Steam Community Market (convertido para R$, usando a moeda BRL).
@@ -58,6 +42,18 @@ Novidades da Versão Recente (Arquitetura Matemática & Auto-Relogger):
 - Paleta de Cores Oficial (tbh.city):
   * Atualização de todas as cores de raridades do painel e do console com as paletas hexadecimais exatas do site oficial "tbh.city".
   * Correção das raridades "BEYOND" (ajustado de verde para rosa-pink) e "COSMIC" (ajustado de rosa para branco puro).
+
+
+Stage Switcher (Alternador Automático de Fases):
+
+O Stage Switcher é uma nova ferramenta de automação (Farm Bot) que alterna as fases do jogo automaticamente enquanto monitora baús!
+1. Vá na aba "Settings" para calibrar os macros. Clique em "Calibrate Stage 1", vá ao jogo e dê um clique na primeira fase. Clique com o botão direito para salvar. Faça o mesmo para o Stage 2.
+2. Na aba "Dashboard", no card do "Stage Switcher", configure o intervalo (ex: 20 segundos) e clique em "START SWITCHER".
+3. O bot alternará os mapas de forma autônoma.
+4. Quando o Painel detectar um Target nos baús, o Switcher Pausará Indefinidamente (os macros pararão) para evitar perder o drop.
+5. Quando o item finalmente cair na sua bolsa (Loot do Save), ele aguardará o "Safety Delay" (45s anti-rollback) e retomará o ciclo automaticamente!
+
+
 
 
 Abas Disponíveis:

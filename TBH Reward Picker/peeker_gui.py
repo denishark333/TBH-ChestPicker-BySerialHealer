@@ -18,6 +18,8 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import messagebox
 from PIL import Image
+import pynput
+import pyautogui
 # Import winsound on Windows for alerts
 try:
     import winsound
@@ -102,6 +104,16 @@ class PeekerGUI(ctk.CTk):
         self.running = True
         default_save = os.path.expandvars(r"%USERPROFILE%\AppData\LocalLow\TesseractStudio\TaskbarHero\SaveFile_Live.es3")
         self.save_file_path = default_save
+        
+        # Stage Switcher state
+        self.stage_1_clicks = []
+        self.stage_2_clicks = []
+        self.switcher_active = False
+        self.current_switcher_stage = 1
+        self.switcher_paused_for_drop = False
+        self.switcher_interval = 20
+        self.switcher_last_action_time = 0.0
+        self.macro_mouse_listener = None
         self.seen_get_chest_ids = set()
         self.seen_use_chest_ids = set()
         self.chest_id_to_drop_map = {}
@@ -196,12 +208,15 @@ class PeekerGUI(ctk.CTk):
                 self.trainer_auto_launch = data.get("trainer_auto_launch", False)
                 self.trainer_path = data.get("trainer_path", str(ROOT / "TBH Trainer.exe"))
                 self.relog_safety_delay = data.get("relog_safety_delay", 45)
+                self.stage_1_clicks = data.get("stage_1_clicks", [])
+                self.stage_2_clicks = data.get("stage_2_clicks", [])
+                self.switcher_interval = data.get("switcher_interval", 20)
                 self.max_chest_index = data.get("max_chest_index", 43)
                 self.rare_chest_cooldown = data.get("rare_chest_cooldown", 420)
                 self.uncommon_chest_cooldown = data.get("uncommon_chest_cooldown", 240)
                 self.save_file_path = data.get("save_file_path", self.save_file_path)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[ERROR] Loading config: {e}")
     def save_peeker_config(self) -> None:
         try:
             data = {
@@ -218,12 +233,15 @@ class PeekerGUI(ctk.CTk):
                 "trainer_auto_launch": self.trainer_auto_launch,
                 "trainer_path": self.trainer_path,
                 "relog_safety_delay": self.relog_safety_delay,
+                "stage_1_clicks": self.stage_1_clicks,
+                "stage_2_clicks": self.stage_2_clicks,
+                "switcher_interval": self.switcher_interval,
                 "max_chest_index": self.max_chest_index,
                 "rare_chest_cooldown": self.rare_chest_cooldown,
                 "uncommon_chest_cooldown": self.uncommon_chest_cooldown,
                 "save_file_path": self.save_file_path
             }
-            PEEKER_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+            PEEKER_CONFIG_PATH.write_text(json.dumps(data, indent=4), encoding="utf-8")
         except Exception as e:
             self.append_log(f"[ERROR] Failed to save config: {e}\n")
     def load_market_cache(self) -> None:
@@ -357,6 +375,7 @@ class PeekerGUI(ctk.CTk):
         self.btn_trust_cert.pack(fill="x", padx=10, pady=(0, 6))
         self.lbl_proxy_status = ctk.CTkLabel(self.proxy_frame, text="Status: Stopped", text_color=COLOR_MUTED, font=ctk.CTkFont(size=11, slant="italic"))
         self.lbl_proxy_status.pack(anchor="w", padx=10, pady=(0, 6))
+        self.build_stage_switcher_dashboard_ui()
         self.build_dashboard_tab()
         self.build_targets_tab()
         self.build_save_tab()
@@ -838,6 +857,205 @@ class PeekerGUI(ctk.CTk):
         self.entry_max_chest_index.insert(0, str(self.max_chest_index))
         self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
         self.update_relogger_ui_visibility()
+        self.build_stage_switcher_settings_ui()
+
+    def toggle_stage_switcher(self):
+        if getattr(self, "macro_is_running", False):
+            self.append_log("[SWITCHER] Cannot start Stage Switcher while Auto-Relogger is active.\n")
+            return
+            
+        if not self.switcher_active:
+            if not self.stage_1_clicks or not self.stage_2_clicks:
+                messagebox.showerror("Error", "Please calibrate both Stage 1 and Stage 2 clicks in Settings first.")
+                return
+            
+            try:
+                self.switcher_interval = int(self.entry_switcher_interval.get())
+            except ValueError:
+                self.switcher_interval = 20
+                self.entry_switcher_interval.delete(0, 'end')
+                self.entry_switcher_interval.insert(0, "20")
+                
+            self.switcher_active = True
+            self.current_switcher_stage = 1
+            self.switcher_paused_for_drop = False
+            self.switcher_last_action_time = 0.0
+            self.btn_toggle_switcher.configure(text="STOP STAGE SWITCHER", fg_color="#e74c3c", hover_color="#c0392b")
+            if hasattr(self, "btn_bot"): self.btn_bot.configure(state="disabled")
+            self.append_log(f"[SWITCHER] Started Stage Switcher mode. Interval: {self.switcher_interval}s.\n")
+            self.stage_switcher_tick()
+        else:
+            self.switcher_active = False
+            self.switcher_paused_for_drop = False
+            self.btn_toggle_switcher.configure(text="START STAGE SWITCHER", fg_color="#2ecc71", hover_color="#27ae60")
+            if hasattr(self, "btn_bot"): self.btn_bot.configure(state="normal")
+            self.lbl_switcher_status.configure(text="Status: Stopped")
+            self.append_log("[SWITCHER] Stopped.\n")
+
+    def stage_switcher_tick(self):
+        if not getattr(self, "switcher_active", False):
+            return
+            
+        if self.switcher_paused_for_drop:
+            self.lbl_switcher_status.configure(text="Status: Target Found! Paused.")
+            self.after(1000, self.stage_switcher_tick)
+            return
+            
+        now = time.time()
+        elapsed = now - self.switcher_last_action_time
+        
+        if elapsed >= self.switcher_interval:
+            # Time to act
+            self.execute_stage_macro(self.current_switcher_stage)
+            self.switcher_last_action_time = time.time()
+            # Toggle for next time
+            self.current_switcher_stage = 2 if self.current_switcher_stage == 1 else 1
+            elapsed = 0
+            
+        remaining = int(self.switcher_interval - elapsed)
+        self.lbl_switcher_status.configure(text=f"Status: Waiting {remaining}s (Next: Stage {self.current_switcher_stage})")
+        self.after(1000, self.stage_switcher_tick)
+
+
+
+    def start_switcher_paused_countdown(self):
+        if not getattr(self, "switcher_active", False):
+            return
+            
+        self.append_log(f"[SWITCHER] Target item detected! Paused indefinitely until capture.\\n")
+        self.switcher_paused_for_drop = True
+        self.lbl_switcher_status.configure(text="Status: Paused (Waiting for capture)")
+        
+        # Show manual resume button
+        try:
+            self.btn_switcher_item_collected.pack_forget()
+            self.btn_switcher_item_collected.pack(fill="x", padx=10, pady=(0, 6), before=self.lbl_switcher_status)
+        except Exception:
+            pass
+
+    def skip_to_switcher_safety_resume(self):
+        self.append_log("[SWITCHER] Target item collected! Activating safety delay before resume...\\n")
+        try:
+            self.btn_switcher_item_collected.pack_forget()
+        except Exception:
+            pass
+        self.start_switcher_safety_countdown(self.relog_safety_delay)
+
+    def start_switcher_safety_countdown(self, seconds_left: int):
+        if not getattr(self, "switcher_active", False):
+            return
+            
+        if seconds_left <= 0:
+            self.append_log(f"[SWITCHER] Safety delay finished. Resuming Stage Switcher!\n")
+            self.switcher_paused_for_drop = False
+            self.switcher_last_action_time = time.time()  # Reset timer so it waits full interval before clicking
+            return
+            
+        self.lbl_switcher_status.configure(text=f"Status: Target Found! Paused (Resuming in {seconds_left}s)")
+        self.after(1000, self.start_switcher_safety_countdown, seconds_left - 1)
+
+    def execute_stage_macro(self, stage_idx):
+        clicks = self.stage_1_clicks if stage_idx == 1 else self.stage_2_clicks
+        self.append_log(f"[SWITCHER] Executing Stage {stage_idx} macro ({len(clicks)} clicks)...\n")
+        
+        def macro_thread():
+            for (x, y) in clicks:
+                if not self.switcher_active:
+                    break
+                pyautogui.click(x=x, y=y)
+                time.sleep(0.6)
+                
+        threading.Thread(target=macro_thread, daemon=True).start()
+
+    def calibrate_stage(self, stage_idx):
+        if self.macro_mouse_listener and self.macro_mouse_listener.running:
+            self.append_log("[SWITCHER] Calibration already in progress.\n")
+            return
+            
+        btn = self.btn_calib_1 if stage_idx == 1 else self.btn_calib_2
+        btn.configure(text="Recording... (Right Click to Stop)", fg_color="#e74c3c", hover_color="#c0392b")
+        self.append_log(f"[SWITCHER] Calibrating Stage {stage_idx}. Left click to save points, Right click to finish.\n")
+        
+        clicks = []
+        
+        def on_click(x, y, button, pressed):
+            if pressed:
+                if button == pynput.mouse.Button.left:
+                    clicks.append((int(x), int(y)))
+                    self.append_log(f"[SWITCHER] Point saved: ({int(x)}, {int(y)})\n")
+                elif button == pynput.mouse.Button.right:
+                    return False # Stop listener
+                    
+        def listener_thread():
+            with pynput.mouse.Listener(on_click=on_click) as listener:
+                self.macro_mouse_listener = listener
+                listener.join()
+            
+            # Update state
+            if stage_idx == 1:
+                self.stage_1_clicks = clicks
+                text = f"Stage 1: {len(clicks)} clicks saved"
+                self.lbl_calib_1_status.configure(text=text)
+            else:
+                self.stage_2_clicks = clicks
+                text = f"Stage 2: {len(clicks)} clicks saved"
+                self.lbl_calib_2_status.configure(text=text)
+                
+            self.after(0, lambda: btn.configure(text=f"Calibrate Stage {stage_idx}", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER))
+            self.append_log(f"[SWITCHER] Calibration finished for Stage {stage_idx}. {len(clicks)} points saved.\n")
+            self.save_peeker_config()
+
+        threading.Thread(target=listener_thread, daemon=True).start()
+
+    def build_stage_switcher_settings_ui(self):
+        frame = ctk.CTkFrame(self.settings_scroll, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        frame.pack(fill="both", expand=True, padx=4, pady=12)
+        
+        lbl_title = ctk.CTkLabel(frame, text="Stage Switcher Setup (Farm Bot)", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
+        lbl_title.pack(anchor="w", padx=15, pady=(8, 5))
+        
+        # Stage 1
+        s1_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        s1_frame.pack(fill="x", padx=15, pady=5)
+        self.btn_calib_1 = ctk.CTkButton(s1_frame, text="Calibrate Stage 1", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(weight="bold"), command=lambda: self.calibrate_stage(1))
+        self.btn_calib_1.pack(side="left", padx=(0, 10))
+        self.lbl_calib_1_status = ctk.CTkLabel(s1_frame, text=f"Stage 1: {len(self.stage_1_clicks)} clicks saved", text_color=COLOR_MUTED)
+        self.lbl_calib_1_status.pack(side="left")
+        
+        # Stage 2
+        s2_frame = ctk.CTkFrame(frame, fg_color="transparent")
+        s2_frame.pack(fill="x", padx=15, pady=5)
+        self.btn_calib_2 = ctk.CTkButton(s2_frame, text="Calibrate Stage 2", fg_color=COLOR_PRIMARY, hover_color=COLOR_HOVER, text_color=COLOR_TEXT, font=ctk.CTkFont(weight="bold"), command=lambda: self.calibrate_stage(2))
+        self.btn_calib_2.pack(side="left", padx=(0, 10))
+        self.lbl_calib_2_status = ctk.CTkLabel(s2_frame, text=f"Stage 2: {len(self.stage_2_clicks)} clicks saved", text_color=COLOR_MUTED)
+        self.lbl_calib_2_status.pack(side="left")
+        
+    def build_stage_switcher_dashboard_ui(self):
+        self.switcher_frame = ctk.CTkFrame(self.sidebar, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
+        self.switcher_frame.pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+        lbl = ctk.CTkLabel(self.switcher_frame, text="Stage Switcher", font=ctk.CTkFont(size=12, weight="bold"), text_color=COLOR_TEXT)
+        lbl.pack(anchor="w", padx=10, pady=(6, 8))
+        
+        row_interval = ctk.CTkFrame(self.switcher_frame, fg_color="transparent")
+        row_interval.pack(fill="x", padx=10, pady=(0, 6))
+        lbl_interval = ctk.CTkLabel(row_interval, text="Interval (s):", font=ctk.CTkFont(size=11, weight="bold"), text_color=COLOR_MUTED)
+        lbl_interval.pack(side="left", padx=(0, 5))
+        self.entry_switcher_interval = ctk.CTkEntry(row_interval, width=40, height=24, fg_color=COLOR_ENTRY_BG, border_color=COLOR_BORDER, text_color=COLOR_TEXT)
+        self.entry_switcher_interval.pack(side="left")
+        self.entry_switcher_interval.insert(0, str(getattr(self, "switcher_interval", 20)))
+        
+        self.btn_toggle_switcher = ctk.CTkButton(self.switcher_frame, text="START SWITCHER", fg_color="#2ecc71", hover_color="#27ae60", text_color=COLOR_TEXT, font=ctk.CTkFont(size=11, weight="bold"), command=self.toggle_stage_switcher, height=32)
+        self.btn_toggle_switcher.pack(fill="x", padx=10, pady=(0, 6))
+        
+
+        self.btn_switcher_item_collected = ctk.CTkButton(self.switcher_frame, text="✅ Item Collected → Resume", fg_color="#e67e22", hover_color="#d35400", text_color=COLOR_TEXT, font=ctk.CTkFont(size=10, weight="bold"), command=self.skip_to_switcher_safety_resume, height=28)
+        self.btn_switcher_item_collected.pack(fill="x", padx=10, pady=(0, 6))
+        self.btn_switcher_item_collected.pack_forget()
+        
+        self.lbl_switcher_status = ctk.CTkLabel(self.switcher_frame, text="Status: Stopped", font=ctk.CTkFont(size=10, slant="italic"), text_color=COLOR_MUTED)
+
+        self.lbl_switcher_status.pack(anchor="w", padx=10, pady=(0, 6))
+
     def build_console_tab(self) -> None:
         self.console_frame = ctk.CTkFrame(self.tab_console, fg_color="transparent")
         self.console_frame.pack(fill="both", expand=True, padx=12, pady=12)
@@ -1206,10 +1424,13 @@ class PeekerGUI(ctk.CTk):
         self.left_content_frame.grid_columnconfigure(0, weight=1)
         self.left_content_frame.grid_columnconfigure(1, weight=1)
         self.left_content_frame.grid_rowconfigure(0, weight=0)
-        self.left_content_frame.grid_rowconfigure(1, weight=1, minsize=360)
+        self.left_content_frame.grid_rowconfigure(1, weight=0)
+        self.left_content_frame.grid_rowconfigure(2, weight=1, minsize=360)
+        
+        
         # 1. Proxy Controls Panel
         self.proxy_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.proxy_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+        self.proxy_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
         lbl = ctk.CTkLabel(self.proxy_frame, text="Proxy Controller", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl.pack(anchor="w", padx=15, pady=(8, 10))
         self.btn_proxy = ctk.CTkButton(
@@ -1243,7 +1464,7 @@ class PeekerGUI(ctk.CTk):
         self.btn_trust_cert.pack(fill="x", padx=15, pady=(0, 8))
         # 2. Relogger Setup Panel
         self.calib_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.calib_frame.grid(row=0, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+        self.calib_frame.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(6, 0), pady=(0, 12))
         lbl_cal = ctk.CTkLabel(self.calib_frame, text="Auto-Relogger Setup", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl_cal.pack(anchor="w", padx=15, pady=(8, 5))
         # Relogger Method Selector
@@ -1336,9 +1557,10 @@ class PeekerGUI(ctk.CTk):
         self.entry_max_chest_index.bind("<KeyRelease>", self.on_max_chest_index_typed)
         # Show/Hide correct container initially
         self.update_relogger_ui_visibility()
+        self.build_stage_switcher_settings_ui()
         # 3. Auto-Relogger Actions Frame
         self.bot_frame = ctk.CTkFrame(self.left_content_frame, fg_color=COLOR_FRAME, border_color=COLOR_BORDER, border_width=1)
-        self.bot_frame.grid(row=1, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
+        self.bot_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 6), pady=(0, 12))
         self.bot_frame.configure(height=360)
         lbl_bot = ctk.CTkLabel(self.bot_frame, text="Auto-Relogger Controls", font=ctk.CTkFont(size=14, weight="bold"), text_color=COLOR_TEXT)
         lbl_bot.pack(anchor="w", padx=15, pady=(8, 10))
@@ -1395,7 +1617,7 @@ class PeekerGUI(ctk.CTk):
             segmented_button_unselected_hover_color=COLOR_SEC_HOVER,
             text_color=COLOR_TEXT
         )
-        self.filter_tabview.grid(row=1, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
+        self.filter_tabview.grid(row=2, column=1, sticky="nsew", padx=(6, 0), pady=(0, 12))
         self.filter_tabview.grid_propagate(False)
         self.filter_tabview.configure(height=360)
         self.tab_items = self.filter_tabview.add("Item Targets")
@@ -1963,6 +2185,7 @@ class PeekerGUI(ctk.CTk):
             self.relogger_method = "mouse_clicks"
         self.save_peeker_config()
         self.update_relogger_ui_visibility()
+        self.build_stage_switcher_settings_ui()
     def update_relogger_ui_visibility(self) -> None:
         if self.relogger_method == "process_restart":
             if hasattr(self, 'clicks_container') and self.clicks_container and self.clicks_container.winfo_exists():
@@ -2632,10 +2855,11 @@ class PeekerGUI(ctk.CTk):
         found_item_ids = []
         found_item_indices = []
         found_chest_ids = []
+        found_item_keys = []
         if res_type == "chests":
             left_list = []
             right_list = []
-            for idx, (chest_id, reward_id) in enumerate(data, 1):
+            for idx, (chest_id, reward_id, item_key) in enumerate(data, 1):
                 c_info = self.get_item_info_by_id(chest_id) or {}
                 r_info = self.get_item_info_by_id(reward_id) or {}
                 c_name = self.get_item_name(c_info, f"Chest ({chest_id})")
@@ -2650,7 +2874,8 @@ class PeekerGUI(ctk.CTk):
                     "c_name": c_name,
                     "c_grade": c_grade,
                     "r_name": r_name,
-                    "r_grade": r_grade
+                    "r_grade": r_grade,
+                    "item_key": str(item_key)
                 }
                 if is_boss_chest:
                     left_list.append(item_data)
@@ -2659,6 +2884,7 @@ class PeekerGUI(ctk.CTk):
                 found_item_ids.append(reward_id)
                 found_item_indices.append(idx)
                 found_chest_ids.append(chest_id)
+                found_item_keys.append(str(item_key))
             # Render side-by-side columns
             col_width = 56
             self.append_log(f"\n================================================================================================\n")
@@ -2759,14 +2985,14 @@ class PeekerGUI(ctk.CTk):
         self.last_found_item_indices = found_item_indices
         self.last_found_chest_ids = found_chest_ids
         self.last_found_res_type = res_type
-        self.evaluate_filters_and_relog(found_item_ids, res_type, found_item_indices, found_chest_ids)
-    def evaluate_filters_and_relog(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
+        self.evaluate_filters_and_relog(found_item_ids, res_type, found_item_indices, found_chest_ids, found_item_keys)
+    def evaluate_filters_and_relog(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None, item_keys: list[str] | None = None) -> None:
         try:
-            self._evaluate_filters_and_relog_impl(found_item_ids, res_type, item_indices, chest_ids)
+            self._evaluate_filters_and_relog_impl(found_item_ids, res_type, item_indices, chest_ids, item_keys)
         except Exception as e:
             import traceback
             self.append_log(f"\n[CRITICAL ERROR] Error in evaluate_filters_and_relog: {e}\n{traceback.format_exc()}\n")
-    def _evaluate_filters_and_relog_impl(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None) -> None:
+    def _evaluate_filters_and_relog_impl(self, found_item_ids: list[int], res_type: str = "chests", item_indices: list[int] | None = None, chest_ids: list[int | None] | None = None, item_keys: list[str] | None = None) -> None:
         if res_type == "chests":
             self.current_stage_queue = list(found_item_ids)
             self.current_chest_queue = list(chest_ids) if chest_ids else [None] * len(found_item_ids)
@@ -2776,13 +3002,14 @@ class PeekerGUI(ctk.CTk):
             self.stageboss_chest_queue = []
             self.normal_chest_queue = []
             
-            if chest_ids:
-                for item_id, chest_id in zip(found_item_ids, chest_ids):
+            if chest_ids and item_keys:
+                for item_id, chest_id, item_key in zip(found_item_ids, chest_ids, item_keys):
                     chest_id_str = str(chest_id)
                     is_boss = chest_id_str.startswith("92") or chest_id_str.startswith("93")
                     drop_info = {
                         "item_id": item_id,
                         "chest_id": chest_id,
+                        "item_key": item_key,
                         "is_unreachable": False
                     }
                     if is_boss:
@@ -2845,6 +3072,9 @@ class PeekerGUI(ctk.CTk):
             # Reset baselines for the new scan/run
             self.initial_use_list = None
             self.collected_run_cids = set()
+            self.boss_chests_in_slots = 0
+            
+
             
             self.after(0, self.update_loot_progress_ui)
         # Check if any target item is present (independent of relogger_active)
@@ -2927,6 +3157,11 @@ class PeekerGUI(ctk.CTk):
                         self.append_log(f"[ERROR] Failed to launch trainer: {e}\n")
                 else:
                     self.append_log(f"[ERROR] Trainer not found at path: {trainer_exe}\n")
+                    
+            # Stage Switcher Pause logic
+            if getattr(self, "switcher_active", False) and not getattr(self, "switcher_paused_for_drop", False):
+                self.start_switcher_paused_countdown()
+            
             # Auto-Relogger specific actions
             if self.relogger_active:
                 if res_type == "chests":
@@ -3496,84 +3731,28 @@ class PeekerGUI(ctk.CTk):
                         current_run_use = [cid for cid in use_list if cid not in self.initial_use_list]
                         current_run_all = list(set(current_run_get + current_run_use))
                         
-                        # Classify new chest drops/openings using itemSaveDatas and next pending items
-                        new_get_unclassified = [cid for cid in current_run_get if cid not in self.chest_id_to_type_map]
-                        if new_get_unclassified:
-                            for cid in new_get_unclassified:
-                                for item in items:
-                                    uid = item.get("UniqueId")
-                                    if uid and str(uid) == cid:
-                                        item_key = item.get("ItemKey")
-                                        if item_key:
-                                            is_boss = str(item_key).startswith("92") or str(item_key).startswith("93")
-                                            self.chest_id_to_type_map[cid] = "boss" if is_boss else "normal"
-                                            break
-                            rem_get = [cid for cid in new_get_unclassified if cid not in self.chest_id_to_type_map]
-                            if rem_get:
-                                rem_get.sort(key=int)
-                                wave = player_data.get("commonSaveData", {}).get("currentStageWave", 0)
-                                if wave == 0:
-                                    self.chest_id_to_type_map[rem_get[0]] = "boss"
-                                    for cid in rem_get[1:]:
-                                        self.chest_id_to_type_map[cid] = "normal"
-                                else:
-                                    for cid in rem_get:
-                                        self.chest_id_to_type_map[cid] = "normal"
-                                        
-                        new_use_unclassified = [cid for cid in current_run_use if cid not in self.chest_id_to_type_map]
-                        if new_use_unclassified:
-                            new_use_unclassified.sort(key=int)
-                            boss_assigned = False
-                            
-                            # Check new items for item-driven classification
-                            new_items = []
-                            for item in items:
-                                uid = item.get("UniqueId")
-                                if uid and str(uid) not in self.seen_inventory_item_ids:
-                                    item_key = item.get("ItemKey")
-                                    if item_key and not str(item_key).startswith(("91", "92", "93")):
-                                        new_items.append(item_key)
-                                        
-                            for cid in new_use_unclassified:
-                                classified = False
-                                for k in new_items:
-                                    # Search in StageBoss queue first (Boss items are more unique)
-                                    for search_idx in range(len(self.stageboss_chest_queue)):
-                                        if self.stageboss_progress_widgets[search_idx]["lbl_status"].cget("text") != "[✔️]" and self.stageboss_chest_queue[search_idx]["item_id"] == k:
-                                            self.chest_id_to_type_map[cid] = "boss"
-                                            classified = True
-                                            boss_assigned = True
-                                            break
-                                    if classified:
-                                        break
-                                        
-                                    # Search in Normal queue
-                                    for search_idx in range(len(self.normal_chest_queue)):
-                                        if self.normal_progress_widgets[search_idx]["lbl_status"].cget("text") != "[✔️]" and self.normal_chest_queue[search_idx]["item_id"] == k:
-                                            self.chest_id_to_type_map[cid] = "normal"
-                                            classified = True
-                                            break
-                                    if classified:
-                                        break
-                                        
-                            rem_use = [cid for cid in new_use_unclassified if cid not in self.chest_id_to_type_map]
-                            if rem_use:
-                                wave = player_data.get("commonSaveData", {}).get("currentStageWave", 0)
-                                if wave == 0:
-                                    if not boss_assigned:
-                                        self.chest_id_to_type_map[rem_use[0]] = "boss"
-                                        for cid in rem_use[1:]:
-                                            self.chest_id_to_type_map[cid] = "normal"
-                                    else:
-                                        for cid in rem_use:
-                                            self.chest_id_to_type_map[cid] = "normal"
-                                else:
-                                    for cid in rem_use:
-                                        self.chest_id_to_type_map[cid] = "normal"
-                                        
-                        # Separate active and opened IDs by classification
-                        boss_cids = sorted([cid for cid in current_run_all if self.chest_id_to_type_map.get(cid) == "boss"], key=int)
-                        normal_cids = sorted([cid for cid in current_run_all if self.chest_id_to_type_map.get(cid) == "normal"], key=int)
+                        # Build mapping from Queue items to their generated cids using perfect suffix matching (Primary Key mapping)
+                        boss_cids = []
+                        for item in self.stageboss_chest_queue:
+                            item_key_str = str(item.get("item_key", ""))
+                            matched_cid = None
+                            for cid in current_run_all:
+                                if item_key_str.endswith(str(cid)):
+                                    matched_cid = cid
+                                    break
+                            if matched_cid:
+                                boss_cids.append(matched_cid)
+                                
+                        normal_cids = []
+                        for item in self.normal_chest_queue:
+                            item_key_str = str(item.get("item_key", ""))
+                            matched_cid = None
+                            for cid in current_run_all:
+                                if item_key_str.endswith(str(cid)):
+                                    matched_cid = cid
+                                    break
+                            if matched_cid:
+                                normal_cids.append(matched_cid)
                         
                         # Real-time residual cooldown tracking
                         if not hasattr(self, "tracked_timestamp_boss_cids"): self.tracked_timestamp_boss_cids = set()
@@ -3591,11 +3770,17 @@ class PeekerGUI(ctk.CTk):
                         
                         expected_items_from_chests = set()
                         
-                        # 1. Update StageBoss Column (Direct index-to-index mapping)
+                        # 1. Update StageBoss Column (Direct Key-to-CID mapping)
                         for idx, item in enumerate(self.stageboss_chest_queue):
                             widgets_ref = self.stageboss_progress_widgets
-                            if idx < len(boss_cids):
-                                cid = boss_cids[idx]
+                            item_key_str = str(item.get("item_key", ""))
+                            cid = None
+                            for run_cid in current_run_all:
+                                if item_key_str.endswith(str(run_cid)):
+                                    cid = run_cid
+                                    break
+                                    
+                            if cid is not None:
                                 is_opened = cid in current_run_use
                                 if is_opened:
                                     self.after(0, lambda w=widgets_ref[idx]: self.update_widget_collected(w))
@@ -3609,17 +3794,26 @@ class PeekerGUI(ctk.CTk):
                                         
                                         if item["item_id"] in self.target_items:
                                             self.append_log(f"[SAVE WATCH] 🎯 TARGET ITEM COLLECTED! Relog safety delay activating...\n")
-                                            self.skip_to_safety_relog()
+                                            if self.relogger_active:
+                                                self.skip_to_safety_relog()
+                                            elif getattr(self, "switcher_active", False) and getattr(self, "switcher_paused_for_drop", False):
+                                                self.skip_to_switcher_safety_resume()
                                 else:
                                     self.after(0, lambda w=widgets_ref[idx]: self.update_widget_dropped(w))
                             else:
                                 self.after(0, lambda w=widgets_ref[idx]: self.update_widget_pending(w))
                                 
-                        # 2. Update Normal Column (Direct index-to-index mapping)
+                        # 2. Update Normal Column (Direct Key-to-CID mapping)
                         for idx, item in enumerate(self.normal_chest_queue):
                             widgets_ref = self.normal_progress_widgets
-                            if idx < len(normal_cids):
-                                cid = normal_cids[idx]
+                            item_key_str = str(item.get("item_key", ""))
+                            cid = None
+                            for run_cid in current_run_all:
+                                if item_key_str.endswith(str(run_cid)):
+                                    cid = run_cid
+                                    break
+                                    
+                            if cid is not None:
                                 is_opened = cid in current_run_use
                                 if is_opened:
                                     self.after(0, lambda w=widgets_ref[idx]: self.update_widget_collected(w))
@@ -3633,7 +3827,10 @@ class PeekerGUI(ctk.CTk):
                                         
                                         if item["item_id"] in self.target_items:
                                             self.append_log(f"[SAVE WATCH] 🎯 TARGET ITEM COLLECTED! Relog safety delay activating...\n")
-                                            self.skip_to_safety_relog()
+                                            if self.relogger_active:
+                                                self.skip_to_safety_relog()
+                                            elif getattr(self, "switcher_active", False) and getattr(self, "switcher_paused_for_drop", False):
+                                                self.skip_to_switcher_safety_resume()
                                 else:
                                     self.after(0, lambda w=widgets_ref[idx]: self.update_widget_dropped(w))
                             else:
