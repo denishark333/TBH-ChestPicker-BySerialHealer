@@ -46,12 +46,13 @@ Novidades da Versão Recente (Integração Steam Market & Cores):
 
 Stage Switcher (Alternador Automático de Fases):
 
-O Stage Switcher é uma nova ferramenta de automação (Farm Bot) que alterna as fases do jogo automaticamente enquanto monitora baús!
+O Stage Switcher é uma nova ferramenta de automação, que alterna as fases do jogo automaticamente enquanto monitora baús
+
 1. Vá na aba "Settings" para calibrar os macros. Clique em "Calibrate Stage 1", vá ao jogo e dê um clique na primeira fase. Clique com o botão direito para salvar. Faça o mesmo para o Stage 2.
 2. Na aba "Dashboard", no card do "Stage Switcher", configure o intervalo (ex: 20 segundos) e clique em "START SWITCHER".
 3. O bot alternará os mapas de forma autônoma.
 4. Quando o Painel detectar um Target nos baús, o Switcher Pausará Indefinidamente (os macros pararão) para evitar perder o drop.
-5. Quando o item finalmente cair na sua bolsa (Loot do Save), ele aguardará o "Safety Delay" (45s anti-rollback) e retomará o ciclo automaticamente!
+5. Quando o item finalmente cair na sua bolsa (Loot do Save), ele aguardará o "Safety Delay" (45s anti-rollback) e retomará o ciclo automaticamente
 
 
 
