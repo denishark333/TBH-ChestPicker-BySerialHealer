@@ -3,6 +3,7 @@ import sys
 import json
 import time
 import datetime
+import re
 from pathlib import Path
 from typing import Any
 import customtkinter as ctk
@@ -1741,6 +1742,7 @@ class GuiMixin:
         self.target_grades = [g for g, var in self.grade_vars.items() if var.get()]
         self.save_peeker_config()
         self.append_log(f"[FILTER] Target Grades updated: {self.target_grades}\n")
+
 
 
 
