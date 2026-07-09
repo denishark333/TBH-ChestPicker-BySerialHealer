@@ -1,5 +1,6 @@
-mitmproxy
 customtkinter
-Pillow
+pillow
 pynput
 pyautogui
+pygetwindow
+cryptography
