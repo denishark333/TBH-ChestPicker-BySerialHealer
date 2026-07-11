@@ -1,5 +1,12 @@
 # TBH Reward Picker 2.5.6
 
+![Status: Under Maintenance](https://img.shields.io/badge/Status-Active%20Reengineering-FF6B6B?style=for-the-badge) ![API: Refactoring](https://img.shields.io/badge/API-Refactoring-4ECDC4?style=for-the-badge) ![PRs: Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen?style=for-the-badge)
+
+> ⚠️ **Important Notice Regarding the Current Version:**
+> Due to recent breaking changes in the target API, our network traffic debugging engine has temporarily lost some of its functionality. We are currently joining forces in an active **community-driven effort** to refactor the Python codebase, update our synchronization dependencies, and bring the automation back faster and more robust than ever.
+> 
+> 📌 *Track our progress in real-time on our [Issues/Projects](#) tab, or check the instructions below on how to set up the development environment if you'd like to contribute!*
+
 An advanced, all-in-one automation and loot-tracking utility for **TaskbarHero**. This tool uses save-file monitoring and network interception to track your loot in real-time, alongside powerful mouse automation tasks to enable 100% safe AFK farming.
 
 ---
